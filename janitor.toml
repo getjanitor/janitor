@@ -1,0 +1,6 @@
+# Janitor CLI version used by the generated GitHub Actions workflow.
+version = "latest"
+
+[review]
+# Run a review when at least one changed path matches one of these glob patterns.
+tracked_paths = ["**"]

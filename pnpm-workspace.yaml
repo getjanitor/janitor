@@ -1,0 +1,4 @@
+allowBuilds:
+  "@google/genai": false
+  lefthook: true
+  protobufjs: true

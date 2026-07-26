@@ -1,0 +1,18 @@
+pre-commit:
+  parallel: false
+  commands:
+    format:
+      glob: "*.{js,mjs,cjs,jsx,ts,mts,cts,tsx,json,jsonc}"
+      run: pnpm format {staged_files}
+      stage_fixed: true
+    lint:
+      glob: "*.{js,mjs,cjs,jsx,ts,mts,cts,tsx}"
+      run: pnpm lint:fix {staged_files}
+      stage_fixed: true
+    typecheck:
+      run: pnpm typecheck
+
+commit-msg:
+  commands:
+    commitlint:
+      run: pnpm exec commitlint --edit {1}

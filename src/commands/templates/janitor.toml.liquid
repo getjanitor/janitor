@@ -1,0 +1,8 @@
+# Janitor CLI version used by the generated GitHub Actions workflow.
+version = {= janitor_version | json_string =}
+
+[review]
+# Run a review when at least one changed path matches one of these glob patterns.
+tracked_paths = [
+{% for tracked_path in tracked_paths %}  {= tracked_path | json_string =}{% unless forloop.last %},{% endunless %}
+{% endfor %}]

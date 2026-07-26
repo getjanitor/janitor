@@ -1,0 +1,15 @@
+provider = "github"
+default_branch = "main"
+
+[release_pr]
+
+[release_pr.version_updates]
+"package.json" = ["version"]
+
+[release_pr.changelog]
+enabled = true
+provider = "git-cliff"
+
+[release_pr.tagging]
+enabled = true
+tag_template = "v{version}"

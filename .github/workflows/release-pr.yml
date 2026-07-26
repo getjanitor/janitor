@@ -1,0 +1,69 @@
+# managed-by: brel
+name: Release PR
+
+on:
+  workflow_dispatch:
+  push:
+    branches:
+      - main
+  pull_request:
+    types:
+      - closed
+    branches:
+      - main
+
+permissions:
+  contents: write
+  pull-requests: write
+
+jobs:
+  release-pr:
+    if: github.event_name != 'pull_request'
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+        with:
+          fetch-depth: 0
+
+      - name: Install brel
+        uses: better-releases/setup-brel@v1
+
+      - name: Install git-cliff
+        uses: taiki-e/install-action@git-cliff
+
+      - name: Generate changelog
+        run: brel changelog
+
+      - name: Generate release PR
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: brel release-pr
+
+  release-tag:
+    if: github.event_name == 'pull_request' && github.event.pull_request.merged == true
+    runs-on: ubuntu-latest
+    steps:
+      - name: Validate tag push token
+        env:
+          BREL_TAG_PUSH_TOKEN: ${{ secrets.BREL_TAG_PUSH_TOKEN }}
+        run: |
+          set -euo pipefail
+          if [ -z "${BREL_TAG_PUSH_TOKEN}" ]; then
+            echo "Missing repository secret BREL_TAG_PUSH_TOKEN." >&2
+            echo "Use a PAT with Contents: Read and write to push release tags from this workflow." >&2
+            echo "GITHUB_TOKEN tag pushes do not trigger downstream tag-push workflows." >&2
+            exit 1
+          fi
+
+      - name: Checkout
+        uses: actions/checkout@v6
+        with:
+          fetch-depth: 0
+          token: ${{ secrets.BREL_TAG_PUSH_TOKEN }}
+
+      - name: Install brel
+        uses: better-releases/setup-brel@v1
+
+      - name: Create release tag
+        run: brel tag
