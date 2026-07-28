@@ -3,17 +3,31 @@ import { join } from "node:path";
 import { type } from "arktype";
 import { minimatch } from "minimatch";
 import { parse } from "smol-toml";
-import type { ChangedFile } from "#/review/types";
+import type { ChangedFile, ReviewDiff, ReviewType } from "#/review/types";
+
+export type DisabledFindingsPolicy = "leave_open" | "review" | "resolve";
+
+export interface ReviewTypeConfig {
+  paths: string[];
+  disabledFindings: DisabledFindingsPolicy;
+}
 
 export interface ReviewConfig {
-  trackedPaths: string[];
+  code: ReviewTypeConfig;
+  security: ReviewTypeConfig;
 }
 
 const nonEmptyString = type("string > 0");
+const disabledFindingsSchema = type("'leave_open' | 'review' | 'resolve'");
+const reviewTypeSchema = {
+  paths: nonEmptyString.array(),
+  "disabled_findings?": disabledFindingsSchema,
+};
 const janitorConfigSchema = type({
   version: nonEmptyString,
   review: {
-    tracked_paths: nonEmptyString.array().atLeastLength(1),
+    code: reviewTypeSchema,
+    security: reviewTypeSchema,
   },
 });
 
@@ -28,24 +42,55 @@ export async function loadReviewConfig(cwd: string): Promise<ReviewConfig> {
 
   try {
     const config = janitorConfigSchema.assert(document);
-    return { trackedPaths: config.review.tracked_paths };
+    return {
+      code: {
+        paths: config.review.code.paths,
+        disabledFindings: config.review.code.disabled_findings ?? "leave_open",
+      },
+      security: {
+        paths: config.review.security.paths,
+        disabledFindings: config.review.security.disabled_findings ?? "leave_open",
+      },
+    };
   } catch (error) {
     const reason = error instanceof Error ? error.message : String(error);
     throw new Error(`Invalid ${path}: ${reason}`, { cause: error });
   }
 }
 
-export function shouldRunReview(files: ChangedFile[], trackedPaths: string[]): boolean {
-  return files.some((file) =>
-    [file.path, file.previousPath].some(
-      (path) =>
-        path !== undefined &&
-        trackedPaths.some((pattern) =>
-          minimatch(path, pattern, {
-            dot: true,
-            nonegate: true,
-          }),
-        ),
-    ),
+export function pathMatchesReviewPaths(path: string, paths: string[]): boolean {
+  return paths.some((pattern) =>
+    minimatch(path, pattern, {
+      dot: true,
+      nonegate: true,
+    }),
   );
+}
+
+export function fileMatchesReviewPaths(file: ChangedFile, paths: string[]): boolean {
+  return [file.path, file.previousPath].some(
+    (path) => path !== undefined && pathMatchesReviewPaths(path, paths),
+  );
+}
+
+export function reviewTypeConfig(config: ReviewConfig, reviewType: ReviewType): ReviewTypeConfig {
+  return config[reviewType];
+}
+
+export function filterReviewDiff(diff: ReviewDiff, paths: string[]): ReviewDiff {
+  return {
+    ...diff,
+    files: diff.files.filter((file) => fileMatchesReviewPaths(file, paths)),
+  };
+}
+
+export function findingPathMatchesReviewPaths(
+  path: string,
+  diff: ReviewDiff,
+  paths: string[],
+): boolean {
+  const changedFile = diff.files.find((file) => file.path === path || file.previousPath === path);
+  return changedFile === undefined
+    ? pathMatchesReviewPaths(path, paths)
+    : fileMatchesReviewPaths(changedFile, paths);
 }

@@ -1,18 +1,37 @@
-import type { ExistingFinding, GeneralReview, NewFinding } from "#/review/types";
+import {
+  REVIEW_TYPES,
+  REVIEW_TYPE_METADATA,
+  type ExistingFinding,
+  type GeneralReview,
+  type NewFinding,
+  type ReviewType,
+} from "#/review/types";
 
-export const GENERAL_REVIEW_MARKER = "<!-- janitor:general-review:v1 -->";
-export const FINDING_MARKER = "<!-- janitor:finding:v1 -->";
+export function generalReviewMarker(reviewType: ReviewType): string {
+  return `<!-- janitor:general-review:${reviewType}:v1 -->`;
+}
+
+export function findingMarker(reviewType: ReviewType): string {
+  return `<!-- janitor:finding:${reviewType}:v1 -->`;
+}
 
 export function renderFindingComment(finding: NewFinding): string {
-  return `${FINDING_MARKER}\n**${finding.severity.toUpperCase()}: ${finding.title}**\n\n${finding.body}`;
+  const type = REVIEW_TYPE_METADATA[finding.reviewType].label.toUpperCase();
+  return `${findingMarker(finding.reviewType)}\n**${type} · ${finding.severity.toUpperCase()}: ${finding.title}**\n\n${finding.body}`;
 }
 
 export function renderGeneralComment(
+  reviewType: ReviewType,
   general: GeneralReview,
-  counts: { newFindings: number; stillOpen: number; fixed: number },
+  counts: {
+    newFindings: number;
+    stillOpen: number;
+    fixed: number;
+    configurationResolved: number;
+  },
 ): string {
-  return `${GENERAL_REVIEW_MARKER}
-## Janitor review
+  return `${generalReviewMarker(reviewType)}
+## ${REVIEW_TYPE_METADATA[reviewType].heading}
 
 ${general.summary}
 
@@ -27,6 +46,7 @@ ${general.mermaid.trim()}
 - New findings: ${counts.newFindings}
 - Existing findings still open: ${counts.stillOpen}
 - Fixed findings resolved: ${counts.fixed}
+- Findings resolved by configuration: ${counts.configurationResolved}
 
 ### Confidence: ${general.confidence}/5
 
@@ -50,10 +70,10 @@ function isBotAuthor(author: string | null): boolean {
 
 export function findJanitorGeneralComment(
   comments: Array<{ id: number; body: string; author: string | null }>,
+  reviewType: ReviewType,
 ): { id: number; body: string } | undefined {
-  return comments.find(
-    (comment) => isBotAuthor(comment.author) && comment.body.includes(GENERAL_REVIEW_MARKER),
-  );
+  const marker = generalReviewMarker(reviewType);
+  return comments.find((comment) => isBotAuthor(comment.author) && comment.body.startsWith(marker));
 }
 
 export function findOpenJanitorFindings(threads: ThreadShape[]): ExistingFinding[] {
@@ -65,18 +85,26 @@ export function findOpenJanitorFindings(threads: ThreadShape[]): ExistingFinding
     // thread's root comment. A later Janitor reply must not make a user-owned
     // thread eligible for automatic resolution.
     const comment = thread.comments[0];
-    if (!isBotAuthor(comment?.author ?? null) || !comment.body.includes(FINDING_MARKER)) {
+    if (!isBotAuthor(comment?.author ?? null)) {
       return [];
     }
+    const reviewType = REVIEW_TYPES.find((candidate) =>
+      comment.body.startsWith(findingMarker(candidate)),
+    );
+    if (reviewType === undefined) {
+      return [];
+    }
+    const marker = findingMarker(reviewType);
     return [
       {
+        reviewType,
         threadId: thread.id,
         commentId: comment.databaseId,
         path: thread.path,
         line: thread.line,
         originalLine: thread.originalLine,
         isOutdated: thread.isOutdated,
-        body: comment.body.replace(FINDING_MARKER, "").trim(),
+        body: comment.body.slice(marker.length).trim(),
       },
     ];
   });

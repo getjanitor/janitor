@@ -61,16 +61,29 @@ Initialization generates:
 - `janitor.toml`
 - `.github/workflows/janitor.yml`
 
-The default configuration reviews changes to every tracked path:
+The default configuration runs both review types for every changed path:
 
 ```toml
 version = "latest"
 
-[review]
-tracked_paths = ["**"]
+[review.code]
+paths = ["**"]
+disabled_findings = "leave_open"
+
+[review.security]
+paths = ["**"]
+disabled_findings = "leave_open"
 ```
 
-Add or change tracked path globs directly in `janitor.toml`. A review needs to run when at least one changed path matches one of these patterns. They are independent of `.gitignore`; Git-ignored files are not present in the repository checkout used by the workflow.
+`review.code.paths` and `review.security.paths` are independent positive glob lists. A changed file is sent only to the matching review type; matching both lists runs both reviews, while matching neither omits the file. Both the old and new paths of a rename are tested. An empty list disables that review type for current files. Patterns use repository-relative paths, include dotfiles, do not support negation, and are independent of `.gitignore`; Git-ignored files are absent from the workflow checkout.
+
+Each type's optional `disabled_findings` setting controls unresolved findings on files that no longer match its paths:
+
+- `leave_open` (default) preserves the thread without sending it to the agent.
+- `review` continues sending the existing thread to that type's agent for disposition, but does not permit new findings on the disabled file.
+- `resolve` automatically resolves the thread without model review.
+
+The `[review.code]` and `[review.security]` sections are required. The former `review.tracked_paths` configuration is not supported.
 
 Existing files are handled independently. Byte-identical targets are left unchanged without prompting, changed targets require confirmation, and `--force` overwrites all changed targets. Cancelling any prompt before writing leaves both targets untouched.
 
@@ -96,16 +109,18 @@ janitor review
 
 `review` is PR-only. It reads the standard GitHub Actions pull-request event, verifies that the checkout is at the PR head, and compares the PR merge base with that head. Running it outside a pull-request Actions job, including as a local staged-change review, is not currently supported.
 
-Before invoking the model, Janitor loads `janitor.toml`. The review is skipped when none of the changed paths (including the old path of a rename) match `review.tracked_paths`. A match enables review of the complete PR diff.
+Before invoking a model, Janitor loads `janitor.toml` and builds a filtered diff for each review type. Code review checks its scoped files for correctness, maintainability, naming/documentation, and performance issues. Security review separately checks its scoped files for concrete vulnerabilities. Repository search remains available so each agent can trace imports, callers, and usages, but the diff tool and new-finding validation permit only that run's configured files.
 
-The coding agent receives read-only repository search tools and the PR diff. It maps imports, callers, and usages; checks the changed code for correctness errors, typos, bad patterns, and missed or premature optimizations; and produces:
+Each executed type produces:
 
-- inline PR review comments anchored to the changed lines where new issues were found
-- one editable PR Conversation comment containing the overall summary, a Mermaid change map, and a confidence score from 1 to 5 with its rationale
+- visibly typed inline PR review comments anchored to changed lines where new issues were found
+- its own editable PR Conversation comment ("Janitor code review" or "Janitor security review") containing a summary, Mermaid change map, finding counts, and a confidence score from 1 to 5 with its rationale
 
-Janitor marks its comments so reruns are idempotent. Each rerun reviews the full current diff and re-evaluates Janitor's unresolved threads. Findings that are still present remain open without duplicate comments, findings explicitly verified as fixed are resolved, new findings receive new inline comments, and the existing general Conversation comment is updated.
+A type runs when it has at least one matched changed file or an existing finding selected by the `review` policy. If neither type has work and both policies are `leave_open`, Janitor skips before accessing GitHub comments or invoking a model. Configuration-only `resolve` actions can run without creating a new model summary.
 
-Only Janitor-authored marked threads are eligible for automatic resolution. User and third-party review threads are never changed.
+Janitor's typed markers make reruns idempotent and keep the two lifecycles independent. Each agent re-evaluates only its selected unresolved threads. Findings that remain present stay open without duplicate comments, findings verified as fixed are resolved, and new findings receive new inline comments. Outputs from every applicable agent are validated before Janitor performs any GitHub mutation, so an invalid code or security result cannot partially post the other result.
+
+Only Janitor-authored, type-marked threads are eligible for automatic or configuration-driven resolution. User and third-party review threads are never changed.
 
 ## Adding a command
 

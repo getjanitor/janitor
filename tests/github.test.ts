@@ -127,6 +127,7 @@ describe("GitHub review client", () => {
     fake.graphqlRequest.mockResolvedValue({ resolveReviewThread: { thread: { id: "t" } } });
     const github = client(fake);
     const finding = {
+      reviewType: "code" as const,
       title: "Issue",
       body: "Impact",
       severity: "high" as const,

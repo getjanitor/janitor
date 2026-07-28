@@ -1,25 +1,35 @@
-import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
+import { mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { buildReviewPrompt } from "#/review/agent";
-import { loadReviewConfig, shouldRunReview } from "#/review/config";
+import {
+  fileMatchesReviewPaths,
+  filterReviewDiff,
+  loadReviewConfig,
+  type DisabledFindingsPolicy,
+  type ReviewConfig,
+} from "#/review/config";
 import { collectReviewDiff, parseCommentableLines, parseNameStatus } from "#/review/git";
 import {
-  FINDING_MARKER,
-  GENERAL_REVIEW_MARKER,
   findJanitorGeneralComment,
   findOpenJanitorFindings,
+  findingMarker,
+  generalReviewMarker,
   renderGeneralComment,
 } from "#/review/markers";
 import { executeReview } from "#/review/orchestrator";
 import { readPullRequestContext, readReviewEnvironment } from "#/review/runtime";
 import type {
+  ChangedFile,
   GitCommandBoundary,
   GitHubReviewBoundary,
   ModelReviewResult,
   PullRequestContext,
   ReviewAgentBoundary,
+  ReviewAgentInput,
+  ReviewDiff,
+  ReviewType,
 } from "#/review/types";
 
 const temporaryDirectories: string[] = [];
@@ -35,18 +45,29 @@ const context: PullRequestContext = {
   headSha: "head-sha",
 };
 
+const cleanGeneral = {
+  summary: "The scoped change is focused and no actionable issues were found.",
+  mermaid: "flowchart LR\n  A[Caller] --> B[Changed code]",
+  confidence: 4,
+  confidenceReason: "All scoped files and their direct callers were inspected.",
+};
+
 async function temporaryDirectory(): Promise<string> {
   const directory = await mkdtemp(join(tmpdir(), "janitor-review-"));
   temporaryDirectories.push(directory);
   return directory;
 }
 
-function reviewGit(path = "src/a.ts"): GitCommandBoundary {
+function reviewGit(paths: string | string[] = "src/a.ts"): GitCommandBoundary {
+  const changedPaths = typeof paths === "string" ? [paths] : paths;
   return {
     async run(args) {
       if (args[0] === "rev-parse") return "head-sha\n";
       if (args[0] === "merge-base") return "merge-sha\n";
-      if (args.includes("--name-status")) return `M\0${path}\0`;
+      if (args.includes("--name-status")) {
+        return changedPaths.map((path) => `M\0${path}\0`).join("");
+      }
+      const path = args.at(-1)!;
       if (args.includes("--unified=0")) {
         return `diff --git a/${path} b/${path}\n--- a/${path}\n+++ b/${path}\n@@ -2 +2 @@\n-old\n+new\n`;
       }
@@ -58,45 +79,43 @@ function reviewGit(path = "src/a.ts"): GitCommandBoundary {
   };
 }
 
+interface PreviousFindingFixture {
+  reviewType: ReviewType;
+  path: string;
+  threadId?: string;
+  line?: number | null;
+}
+
 function githubBoundary(
   options: {
-    previous?: boolean;
-    general?: boolean;
+    previous?: PreviousFindingFixture[];
+    general?: ReviewType[];
   } = {},
 ): GitHubReviewBoundary & Record<string, ReturnType<typeof vi.fn>> {
-  const previous = options.previous ?? false;
   return {
     listGeneralComments: vi.fn(async () =>
-      options.general
-        ? [
-            {
-              id: 9,
-              body: GENERAL_REVIEW_MARKER,
-              author: "github-actions[bot]",
-            },
-          ]
-        : [],
+      (options.general ?? []).map((reviewType, index) => ({
+        id: 10 + index,
+        body: generalReviewMarker(reviewType),
+        author: "github-actions[bot]",
+      })),
     ),
     listReviewThreads: vi.fn(async () =>
-      previous
-        ? [
-            {
-              id: "thread-1",
-              isResolved: false,
-              isOutdated: false,
-              path: "src/a.ts",
-              line: 2,
-              originalLine: 2,
-              comments: [
-                {
-                  databaseId: 7,
-                  body: `${FINDING_MARKER}\n**HIGH: Existing issue**`,
-                  author: "github-actions[bot]",
-                },
-              ],
-            },
-          ]
-        : [],
+      (options.previous ?? []).map((finding, index) => ({
+        id: finding.threadId ?? `thread-${index + 1}`,
+        isResolved: false,
+        isOutdated: false,
+        path: finding.path,
+        line: finding.line === undefined ? 2 : finding.line,
+        originalLine: 2,
+        comments: [
+          {
+            databaseId: 20 + index,
+            body: `${findingMarker(finding.reviewType)}\n**HIGH: Existing issue**`,
+            author: "github-actions[bot]",
+          },
+        ],
+      })),
     ),
     createInlineComment: vi.fn(async () => undefined),
     resolveThread: vi.fn(async () => undefined),
@@ -105,26 +124,65 @@ function githubBoundary(
   } as never;
 }
 
-function agent(result: ModelReviewResult): ReviewAgentBoundary {
-  return { run: vi.fn(async () => result) };
+function modelResult(overrides: Partial<ModelReviewResult> = {}): ModelReviewResult {
+  return {
+    findings: [],
+    dispositions: [],
+    general: cleanGeneral,
+    ...overrides,
+  };
 }
 
-const cleanGeneral = {
-  summary: "The change is focused and no actionable issues were found.",
-  mermaid: "flowchart LR\n  A[Caller] --> B[Changed code]",
-  confidence: 4,
-  confidenceReason: "All changed files and their direct callers were inspected.",
-};
+function agent(
+  handler: (input: ReviewAgentInput) => ModelReviewResult | Promise<ModelReviewResult>,
+): ReviewAgentBoundary & { run: ReturnType<typeof vi.fn> } {
+  return { run: vi.fn(handler) } as never;
+}
 
-async function execute(modelResult: ModelReviewResult, github = githubBoundary()) {
+function reviewConfig(
+  options: {
+    codePaths?: string[];
+    securityPaths?: string[];
+    codePolicy?: DisabledFindingsPolicy;
+    securityPolicy?: DisabledFindingsPolicy;
+  } = {},
+): ReviewConfig {
+  return {
+    code: {
+      paths: options.codePaths ?? ["src/**"],
+      disabledFindings: options.codePolicy ?? "leave_open",
+    },
+    security: {
+      paths: options.securityPaths ?? [],
+      disabledFindings: options.securityPolicy ?? "leave_open",
+    },
+  };
+}
+
+async function runReview(options: {
+  git?: GitCommandBoundary;
+  github?: ReturnType<typeof githubBoundary>;
+  reviewAgent: ReviewAgentBoundary;
+  config?: ReviewConfig;
+}) {
   return executeReview({
     cwd: "/repo",
     context,
-    git: reviewGit(),
-    github,
-    agent: agent(modelResult),
-    configLoader: async () => ({ trackedPaths: ["src/**"] }),
+    git: options.git ?? reviewGit(),
+    github: options.github ?? githubBoundary(),
+    agent: options.reviewAgent,
+    configLoader: async () => options.config ?? reviewConfig(),
   });
+}
+
+function changedFile(path: string, previousPath?: string): ChangedFile {
+  return {
+    path,
+    previousPath,
+    status: previousPath === undefined ? "modified" : "renamed",
+    patch: "",
+    commentableLines: { left: new Set([2]), right: new Set([2]) },
+  };
 }
 
 afterEach(async () => {
@@ -175,42 +233,64 @@ describe("review runtime and configuration", () => {
     );
   });
 
-  it("loads tracked globs and treats them as a review gate", async () => {
+  it("loads independent paths, empty lists, policies, and omitted policy defaults", async () => {
     const directory = await temporaryDirectory();
     await writeFile(
       join(directory, "janitor.toml"),
-      'version = "latest"\n[review]\ntracked_paths = ["src/**", ".github/**"]\n',
+      `version = "latest"
+[review.code]
+paths = ["src/**", ".github/**"]
+disabled_findings = "review"
+[review.security]
+paths = []
+`,
     );
     await expect(loadReviewConfig(directory)).resolves.toEqual({
-      trackedPaths: ["src/**", ".github/**"],
+      code: { paths: ["src/**", ".github/**"], disabledFindings: "review" },
+      security: { paths: [], disabledFindings: "leave_open" },
     });
-    expect(
-      shouldRunReview(
-        [
-          {
-            path: "docs/readme.md",
-            previousPath: "src/readme.ts",
-            status: "renamed",
-            patch: "",
-            commentableLines: { left: new Set(), right: new Set() },
-          },
-        ],
-        ["src/**"],
-      ),
-    ).toBe(true);
   });
 
-  it("rejects malformed review configuration", async () => {
+  it("rejects missing sections, empty patterns, invalid policies, and old configuration", async () => {
     const directory = await temporaryDirectory();
-    await mkdir(directory, { recursive: true });
     const configPath = join(directory, "janitor.toml");
-    await writeFile(configPath, "version = 'latest'\n");
-    await expect(loadReviewConfig(directory)).rejects.toThrow(/review must be an object/u);
+    await writeFile(configPath, "version = 'latest'\n[review]\ntracked_paths = ['src/**']\n");
+    await expect(loadReviewConfig(directory)).rejects.toThrow(/review\.code must be an object/u);
 
-    await writeFile(configPath, "version = 'latest'\n[review]\ntracked_paths = ['']\n");
-    await expect(loadReviewConfig(directory)).rejects.toThrow(
-      /tracked_paths\[0\] must be non-empty/u,
+    await writeFile(
+      configPath,
+      "version = 'latest'\n[review.code]\npaths = ['']\n[review.security]\npaths = []\n",
     );
+    await expect(loadReviewConfig(directory)).rejects.toThrow(/paths\[0\] must be non-empty/u);
+
+    await writeFile(
+      configPath,
+      "version = 'latest'\n[review.code]\npaths = []\ndisabled_findings = 'close'\n[review.security]\npaths = []\n",
+    );
+    await expect(loadReviewConfig(directory)).rejects.toThrow(/disabled_findings/u);
+  });
+
+  it("classifies code-only, security-only, overlapping, neither, and rename scopes", () => {
+    const diff: ReviewDiff = {
+      mergeBase: "merge",
+      headSha: "head",
+      files: [
+        changedFile("src/code.ts"),
+        changedFile("infra/policy.yml"),
+        changedFile("shared.ts"),
+        changedFile("docs/readme.md"),
+        changedFile("new/location.ts", "src/old.ts"),
+      ],
+    };
+    expect(filterReviewDiff(diff, ["src/**", "shared.ts"]).files.map((file) => file.path)).toEqual([
+      "src/code.ts",
+      "shared.ts",
+      "new/location.ts",
+    ]);
+    expect(
+      filterReviewDiff(diff, ["infra/**", "shared.ts"]).files.map((file) => file.path),
+    ).toEqual(["infra/policy.yml", "shared.ts"]);
+    expect(fileMatchesReviewPaths(diff.files[3]!, ["src/**"])).toBe(false);
   });
 });
 
@@ -233,8 +313,7 @@ describe("git diff collection", () => {
   });
 
   it("uses the merge base, verifies HEAD, and gathers readable and location patches", async () => {
-    const git = reviewGit("src/a.ts");
-    const diff = await collectReviewDiff("/repo", context, git);
+    const diff = await collectReviewDiff("/repo", context, reviewGit());
     expect(diff.mergeBase).toBe("merge-sha");
     expect(diff.files[0]?.commentableLines.right.has(2)).toBe(true);
     expect(diff.files[0]?.commentableLines.left.has(2)).toBe(true);
@@ -277,29 +356,35 @@ describe("git diff collection", () => {
   });
 });
 
-describe("Janitor markers and prompt", () => {
-  it("only recognizes marked output authored by the authenticated viewer", () => {
+describe("typed Janitor markers and prompts", () => {
+  it("recognizes exact typed bot markers and ignores user roots and untyped markers", () => {
     expect(
-      findJanitorGeneralComment([
-        { id: 1, body: GENERAL_REVIEW_MARKER, author: "someone" },
-        { id: 2, body: GENERAL_REVIEW_MARKER, author: "janitor[bot]" },
-      ]),
-    ).toMatchObject({ id: 2 });
+      findJanitorGeneralComment(
+        [
+          { id: 1, body: generalReviewMarker("code"), author: "someone" },
+          { id: 2, body: "<!-- janitor:general-review:v1 -->", author: "janitor[bot]" },
+          { id: 3, body: generalReviewMarker("code"), author: "janitor[bot]" },
+        ],
+        "code",
+      ),
+    ).toMatchObject({ id: 3 });
     expect(
       findOpenJanitorFindings([
         {
-          id: "thread",
+          id: "security-thread",
           isResolved: false,
           isOutdated: true,
           path: "a.ts",
           line: null,
           originalLine: 4,
-          comments: [{ databaseId: 2, body: `${FINDING_MARKER}\nissue`, author: "janitor[bot]" }],
+          comments: [
+            {
+              databaseId: 2,
+              body: `${findingMarker("security")}\nissue`,
+              author: "janitor[bot]",
+            },
+          ],
         },
-      ]),
-    ).toMatchObject([{ threadId: "thread", body: "issue", isOutdated: true }]);
-    expect(
-      findOpenJanitorFindings([
         {
           id: "user-thread",
           isResolved: false,
@@ -309,31 +394,48 @@ describe("Janitor markers and prompt", () => {
           originalLine: 2,
           comments: [
             { databaseId: 3, body: "User finding", author: "user" },
-            { databaseId: 4, body: FINDING_MARKER, author: "janitor[bot]" },
+            {
+              databaseId: 4,
+              body: findingMarker("code"),
+              author: "janitor[bot]",
+            },
           ],
         },
       ]),
-    ).toEqual([]);
+    ).toMatchObject([
+      { threadId: "security-thread", reviewType: "security", body: "issue", isOutdated: true },
+    ]);
   });
 
-  it("renders one marked general comment with diagram and confidence", () => {
-    const body = renderGeneralComment(cleanGeneral, {
+  it("renders separate marked general comments", () => {
+    const codeBody = renderGeneralComment("code", cleanGeneral, {
       newFindings: 0,
       stillOpen: 0,
       fixed: 0,
+      configurationResolved: 0,
     });
-    expect(body).toContain(GENERAL_REVIEW_MARKER);
-    expect(body).toContain("```mermaid");
-    expect(body).toContain("Confidence: 4/5");
+    const securityBody = renderGeneralComment("security", cleanGeneral, {
+      newFindings: 0,
+      stillOpen: 0,
+      fixed: 0,
+      configurationResolved: 0,
+    });
+    expect(codeBody).toContain(generalReviewMarker("code"));
+    expect(codeBody).toContain("## Janitor code review");
+    expect(securityBody).toContain(generalReviewMarker("security"));
+    expect(securityBody).toContain("## Janitor security review");
+    expect(codeBody).toContain("Confidence: 4/5");
   });
 
-  it("instructs the agent to map usages and explicitly disposition old threads", () => {
-    const prompt = buildReviewPrompt({
+  it("builds distinct scoped prompts and supports disposition-only runs", () => {
+    const baseInput: ReviewAgentInput = {
+      reviewType: "code",
       cwd: "/repo",
       context,
       diff: { mergeBase: "merge", headSha: "head-sha", files: [] },
       previousFindings: [
         {
+          reviewType: "code",
           threadId: "thread-1",
           commentId: 1,
           path: "a.ts",
@@ -343,111 +445,238 @@ describe("Janitor markers and prompt", () => {
           body: "issue",
         },
       ],
+    };
+    const codePrompt = buildReviewPrompt(baseInput);
+    const securityPrompt = buildReviewPrompt({
+      ...baseInput,
+      reviewType: "security",
+      previousFindings: [],
     });
-    expect(prompt).toContain("imports");
-    expect(prompt).toContain("thread-1");
-    expect(prompt).toContain("premature optimizations");
-    expect(prompt).toContain("submit_review exactly once");
+    expect(codePrompt).toContain("code-quality issues");
+    expect(codePrompt).toContain("report security concerns in this run");
+    expect(codePrompt).toContain("thread-1");
+    expect(codePrompt).toContain("disposition-only");
+    expect(codePrompt).toContain("submit_review exactly once");
+    expect(securityPrompt).toContain("authentication or authorization");
+    expect(securityPrompt).toContain("security issues");
+    expect(securityPrompt).not.toContain("premature optimizations");
   });
 });
 
-describe("review reconciliation", () => {
-  it("posts new inline findings and creates the canonical general comment", async () => {
+describe("typed review orchestration", () => {
+  it("runs separate agents over code-only, security-only, and overlapping files", async () => {
+    const reviewAgent = agent(() => modelResult());
+    const result = await runReview({
+      git: reviewGit(["src/code.ts", "infra/policy.yml", "shared.ts", "docs/readme.md"]),
+      reviewAgent,
+      config: reviewConfig({
+        codePaths: ["src/**", "shared.ts"],
+        securityPaths: ["infra/**", "shared.ts"],
+      }),
+    });
+
+    expect(reviewAgent.run).toHaveBeenCalledTimes(2);
+    const inputs = reviewAgent.run.mock.calls.map((call) => call[0] as ReviewAgentInput);
+    expect(
+      inputs.find((input) => input.reviewType === "code")?.diff.files.map((file) => file.path),
+    ).toEqual(["src/code.ts", "shared.ts"]);
+    expect(
+      inputs.find((input) => input.reviewType === "security")?.diff.files.map((file) => file.path),
+    ).toEqual(["infra/policy.yml", "shared.ts"]);
+    expect(result.code.skipped).toBe(false);
+    expect(result.security.skipped).toBe(false);
+  });
+
+  it("posts typed findings and creates one general comment for each type", async () => {
     const github = githubBoundary();
-    const result = await execute(
-      {
+    const reviewAgent = agent((input) =>
+      modelResult({
         findings: [
           {
-            title: "Incorrect replacement",
-            body: "This changes the behavior unexpectedly.",
+            reviewType: input.reviewType,
+            title: `${input.reviewType} issue`,
+            body: "This has a concrete impact.",
             severity: "high",
             path: "src/a.ts",
             side: "RIGHT",
             line: 2,
           },
         ],
-        dispositions: [],
-        general: cleanGeneral,
-      },
-      github,
+      }),
     );
-    expect(result).toEqual({ skipped: false, newFindings: 1, stillOpen: 0, fixed: 0 });
-    expect(github.createInlineComment).toHaveBeenCalledOnce();
-    expect(github.createInlineComment.mock.calls[0]?.[1]).toContain(FINDING_MARKER);
+    const result = await runReview({
+      github,
+      reviewAgent,
+      config: reviewConfig({ codePaths: ["src/**"], securityPaths: ["src/**"] }),
+    });
+
+    expect(result.code.newFindings).toBe(1);
+    expect(result.security.newFindings).toBe(1);
+    expect(github.createInlineComment).toHaveBeenCalledTimes(2);
+    const inlineBodies = github.createInlineComment.mock.calls.map((call) => String(call[1]));
+    expect(inlineBodies).toEqual(
+      expect.arrayContaining([
+        expect.stringContaining(findingMarker("code")),
+        expect.stringContaining(findingMarker("security")),
+      ]),
+    );
+    expect(github.createGeneralComment).toHaveBeenCalledTimes(2);
+    const generalBodies = github.createGeneralComment.mock.calls.map((call) => String(call[0]));
+    expect(generalBodies).toEqual(
+      expect.arrayContaining([
+        expect.stringContaining("## Janitor code review"),
+        expect.stringContaining("## Janitor security review"),
+      ]),
+    );
+  });
+
+  it("updates only the matching typed general comment and resolves model-fixed findings", async () => {
+    const github = githubBoundary({
+      previous: [{ reviewType: "code", path: "src/a.ts", threadId: "code-thread" }],
+      general: ["code", "security"],
+    });
+    const reviewAgent = agent((input) =>
+      modelResult({
+        dispositions:
+          input.reviewType === "code"
+            ? [{ threadId: "code-thread", status: "fixed", reason: "Removed." }]
+            : [],
+      }),
+    );
+    await runReview({
+      github,
+      reviewAgent,
+      config: reviewConfig({ codePaths: ["src/**"], securityPaths: ["src/**"] }),
+    });
+
+    expect(github.resolveThread).toHaveBeenCalledWith("code-thread");
+    expect(github.updateGeneralComment).toHaveBeenCalledWith(
+      10,
+      expect.stringContaining("Janitor code review"),
+    );
+    expect(github.updateGeneralComment).toHaveBeenCalledWith(
+      11,
+      expect.stringContaining("Janitor security review"),
+    );
+  });
+
+  it("preserves disabled findings under leave_open while reviewing matched files", async () => {
+    const github = githubBoundary({
+      previous: [{ reviewType: "code", path: "docs/old.md", threadId: "left-open" }],
+    });
+    const reviewAgent = agent((input) => {
+      expect(input.previousFindings).toEqual([]);
+      return modelResult();
+    });
+    const result = await runReview({ github, reviewAgent });
+
+    expect(result.code.leftOpen).toBe(1);
+    expect(github.resolveThread).not.toHaveBeenCalled();
+  });
+
+  it("runs a disposition-only review for disabled findings under review policy", async () => {
+    const github = githubBoundary({
+      previous: [{ reviewType: "code", path: "docs/old.md", threadId: "review-old" }],
+    });
+    const reviewAgent = agent((input) => {
+      expect(input.reviewType).toBe("code");
+      expect(input.diff.files).toEqual([]);
+      expect(input.previousFindings.map((finding) => finding.threadId)).toEqual(["review-old"]);
+      return modelResult({
+        dispositions: [{ threadId: "review-old", status: "still_present" }],
+      });
+    });
+    const result = await runReview({
+      github,
+      reviewAgent,
+      config: reviewConfig({ codePaths: [], codePolicy: "review" }),
+    });
+
+    expect(reviewAgent.run).toHaveBeenCalledOnce();
+    expect(result.code.stillOpen).toBe(1);
     expect(github.createGeneralComment).toHaveBeenCalledOnce();
-    expect(github.updateGeneralComment).not.toHaveBeenCalled();
-  });
-
-  it("leaves a reproduced thread open without posting a duplicate", async () => {
-    const github = githubBoundary({ previous: true, general: true });
-    await execute(
-      {
-        findings: [],
-        dispositions: [{ threadId: "thread-1", status: "still_present" }],
-        general: cleanGeneral,
-      },
-      github,
-    );
-    expect(github.createInlineComment).not.toHaveBeenCalled();
     expect(github.resolveThread).not.toHaveBeenCalled();
-    expect(github.updateGeneralComment).toHaveBeenCalledWith(9, expect.any(String));
   });
 
-  it("resolves an explicitly fixed old finding and updates the general comment", async () => {
-    const github = githubBoundary({ previous: true, general: true });
-    await execute(
-      {
-        findings: [],
-        dispositions: [
-          { threadId: "thread-1", status: "fixed", reason: "The unsafe branch was removed." },
-        ],
-        general: cleanGeneral,
-      },
+  it("automatically resolves disabled findings under resolve policy without an agent", async () => {
+    const github = githubBoundary({
+      previous: [{ reviewType: "code", path: "docs/old.md", threadId: "resolve-old" }],
+    });
+    const reviewAgent = agent(() => modelResult());
+    const result = await runReview({
       github,
-    );
-    expect(github.resolveThread).toHaveBeenCalledWith("thread-1");
-    expect(github.updateGeneralComment).toHaveBeenCalledOnce();
-  });
+      reviewAgent,
+      config: reviewConfig({ codePaths: [], codePolicy: "resolve" }),
+    });
 
-  it("performs no mutations when model output is incomplete or has an invalid location", async () => {
-    const github = githubBoundary({ previous: true });
-    await expect(
-      execute(
-        {
-          findings: [
-            {
-              title: "Issue",
-              body: "Impact",
-              severity: "high",
-              path: "src/a.ts",
-              side: "RIGHT",
-              line: 99,
-            },
-          ],
-          dispositions: [],
-          general: cleanGeneral,
-        },
-        github,
-      ),
-    ).rejects.toThrow(/omitted dispositions|not a changed line/u);
-    expect(github.createInlineComment).not.toHaveBeenCalled();
-    expect(github.resolveThread).not.toHaveBeenCalled();
+    expect(reviewAgent.run).not.toHaveBeenCalled();
+    expect(github.resolveThread).toHaveBeenCalledWith("resolve-old");
     expect(github.createGeneralComment).not.toHaveBeenCalled();
+    expect(result.code).toMatchObject({ skipped: false, configurationResolved: 1 });
   });
 
-  it("skips before GitHub or model access when tracked paths do not match", async () => {
+  it("allows an empty list to disable one type while the other runs", async () => {
+    const reviewAgent = agent(() => modelResult());
+    const result = await runReview({
+      reviewAgent,
+      config: reviewConfig({ codePaths: [], securityPaths: ["src/**"] }),
+    });
+    expect(reviewAgent.run).toHaveBeenCalledOnce();
+    expect((reviewAgent.run.mock.calls[0]![0] as ReviewAgentInput).reviewType).toBe("security");
+    expect(result.code.skipped).toBe(true);
+    expect(result.security.skipped).toBe(false);
+  });
+
+  it("skips before GitHub and model access when neither type has work", async () => {
     const github = githubBoundary();
-    const reviewAgent = agent({ findings: [], dispositions: [], general: cleanGeneral });
-    const result = await executeReview({
-      cwd: "/repo",
-      context,
+    const reviewAgent = agent(() => modelResult());
+    const result = await runReview({
       git: reviewGit("docs/a.md"),
       github,
-      agent: reviewAgent,
-      configLoader: async () => ({ trackedPaths: ["src/**"] }),
+      reviewAgent,
+      config: reviewConfig({ codePaths: ["src/**"], securityPaths: ["infra/**"] }),
     });
     expect(result.skipped).toBe(true);
     expect(github.listGeneralComments).not.toHaveBeenCalled();
     expect(reviewAgent.run).not.toHaveBeenCalled();
+  });
+
+  it("performs no GitHub mutation when either agent output fails validation", async () => {
+    const github = githubBoundary({
+      previous: [{ reviewType: "code", path: "docs/old.md", threadId: "deferred-resolve" }],
+    });
+    const reviewAgent = agent((input) =>
+      input.reviewType === "code"
+        ? modelResult()
+        : modelResult({
+            findings: [
+              {
+                reviewType: "security",
+                title: "Invalid location",
+                body: "Impact",
+                severity: "high",
+                path: "src/a.ts",
+                side: "RIGHT",
+                line: 99,
+              },
+            ],
+          }),
+    );
+
+    await expect(
+      runReview({
+        github,
+        reviewAgent,
+        config: reviewConfig({
+          codePaths: ["src/**"],
+          securityPaths: ["src/**"],
+          codePolicy: "resolve",
+        }),
+      }),
+    ).rejects.toThrow(/not a changed line/u);
+    expect(github.createInlineComment).not.toHaveBeenCalled();
+    expect(github.resolveThread).not.toHaveBeenCalled();
+    expect(github.createGeneralComment).not.toHaveBeenCalled();
+    expect(github.updateGeneralComment).not.toHaveBeenCalled();
   });
 });

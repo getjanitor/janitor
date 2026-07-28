@@ -3,6 +3,7 @@ import { createReviewTools } from "#/harness/tools/github/index";
 import type { ModelReviewResult, ReviewAgentInput } from "#/review/types";
 
 const input: ReviewAgentInput = {
+  reviewType: "code",
   cwd: "/repo",
   context: {
     repository: "owner/repo",
@@ -48,6 +49,7 @@ describe("review agent tools", () => {
     expect(diffResult.content).toEqual([{ type: "text", text: "@@ -1 +1 @@\n-old\n+new" }]);
 
     await execute(tools, "report_finding", {
+      reviewType: "security",
       title: "Issue",
       body: "Impact",
       severity: "high",
@@ -67,7 +69,7 @@ describe("review agent tools", () => {
       confidenceReason: "Inspected all callers",
     });
 
-    expect(output.findings).toHaveLength(1);
+    expect(output.findings).toMatchObject([{ reviewType: "code", title: "Issue" }]);
     expect(output.dispositions).toEqual([
       { threadId: "thread", status: "fixed", reason: "Removed" },
     ]);

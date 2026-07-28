@@ -1,3 +1,11 @@
+export const REVIEW_TYPES = ["code", "security"] as const;
+export type ReviewType = (typeof REVIEW_TYPES)[number];
+
+export const REVIEW_TYPE_METADATA: Record<ReviewType, { label: string; heading: string }> = {
+  code: { label: "code", heading: "Janitor code review" },
+  security: { label: "security", heading: "Janitor security review" },
+};
+
 export type DiffSide = "LEFT" | "RIGHT";
 
 export interface PullRequestContext {
@@ -44,6 +52,7 @@ export interface ReviewDiff {
 export type FindingSeverity = "critical" | "high" | "medium" | "low";
 
 export interface NewFinding {
+  reviewType: ReviewType;
   title: string;
   body: string;
   severity: FindingSeverity;
@@ -53,6 +62,7 @@ export interface NewFinding {
 }
 
 export interface ExistingFinding {
+  reviewType: ReviewType;
   threadId: string;
   commentId: number | null;
   path: string;
@@ -80,6 +90,7 @@ export interface ModelReviewResult {
 }
 
 export interface ReviewAgentInput {
+  reviewType: ReviewType;
   cwd: string;
   context: PullRequestContext;
   diff: ReviewDiff;

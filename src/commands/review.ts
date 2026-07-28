@@ -14,7 +14,7 @@ import type {
 
 export const reviewCliOptions = {
   help: {
-    description: "Review the current GitHub pull request for quality and security issues",
+    description: "Run configured code and security reviews for the current GitHub pull request",
   },
   strictFlags: true,
 } satisfies CliOptions;
@@ -56,11 +56,18 @@ export async function review(dependencies: ReviewDependencies = {}): Promise<Exe
   });
 
   const report = dependencies.report ?? console.log;
-  report(
-    result.skipped
-      ? "Janitor review skipped: no changed path matched review.tracked_paths."
-      : `Janitor review complete: ${result.newFindings} new, ${result.stillOpen} still open, ${result.fixed} fixed.`,
-  );
+  if (result.skipped) {
+    report("Janitor review skipped: no review type had matched files or reviewable findings.");
+  } else {
+    for (const reviewType of ["code", "security"] as const) {
+      const typeResult = result[reviewType];
+      report(
+        typeResult.skipped
+          ? `Janitor ${reviewType} review skipped.`
+          : `Janitor ${reviewType} review complete: ${typeResult.newFindings} new, ${typeResult.stillOpen} still open, ${typeResult.fixed} fixed, ${typeResult.configurationResolved} resolved by configuration, ${typeResult.leftOpen} excluded and left open.`,
+      );
+    }
+  }
   return result;
 }
 

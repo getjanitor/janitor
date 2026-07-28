@@ -5,7 +5,8 @@ import { cli, type CliOptions } from "cleye";
 import { Liquid } from "liquidjs";
 
 const DEFAULT_JANITOR_VERSION = "latest";
-const DEFAULT_TRACKED_PATHS = ["**"];
+const DEFAULT_REVIEW_PATHS = ["**"];
+const DEFAULT_DISABLED_FINDINGS = "leave_open";
 const VERSION_OR_TAG_PATTERN = /^[0-9A-Za-z][0-9A-Za-z._-]*$/;
 
 const templateUrls = {
@@ -21,7 +22,9 @@ export interface InitOptions {
 export interface InitTemplateContext {
   janitor_package: string;
   janitor_version: string;
-  tracked_paths: string[];
+  code_paths: string[];
+  security_paths: string[];
+  disabled_findings: string;
 }
 
 export interface RenderedInitFiles {
@@ -213,7 +216,9 @@ export async function init(
     {
       janitor_package: `@matfire/janitor@${janitorVersion}`,
       janitor_version: janitorVersion,
-      tracked_paths: DEFAULT_TRACKED_PATHS,
+      code_paths: DEFAULT_REVIEW_PATHS,
+      security_paths: DEFAULT_REVIEW_PATHS,
+      disabled_findings: DEFAULT_DISABLED_FINDINGS,
     },
     dependencies.templateLoader,
   );

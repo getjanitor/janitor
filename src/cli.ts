@@ -7,7 +7,7 @@ const commands = {
     loader: () => import("#/commands/init"),
   },
   review: {
-    description: "Review code for quality and security issues",
+    description: "Run configurable code and security pull-request reviews",
     loader: () => import("#/commands/review"),
   },
 } satisfies NonNullable<CliOptions["commands"]>;

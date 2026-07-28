@@ -1,4 +1,10 @@
-import { loadReviewConfig, shouldRunReview } from "#/review/config";
+import {
+  filterReviewDiff,
+  findingPathMatchesReviewPaths,
+  loadReviewConfig,
+  type DisabledFindingsPolicy,
+  type ReviewConfig,
+} from "#/review/config";
 import { collectReviewDiff, isCommentableLocation } from "#/review/git";
 import {
   findJanitorGeneralComment,
@@ -6,11 +12,16 @@ import {
   renderFindingComment,
   renderGeneralComment,
 } from "#/review/markers";
-import type {
-  GitCommandBoundary,
-  GitHubReviewBoundary,
-  PullRequestContext,
-  ReviewAgentBoundary,
+import {
+  REVIEW_TYPES,
+  type ExistingFinding,
+  type GitCommandBoundary,
+  type GitHubReviewBoundary,
+  type ModelReviewResult,
+  type PullRequestContext,
+  type ReviewAgentBoundary,
+  type ReviewDiff,
+  type ReviewType,
 } from "#/review/types";
 
 const GITHUB_COMMENT_LIMIT = 65_536;
@@ -24,11 +35,52 @@ export interface ExecuteReviewOptions {
   configLoader?: typeof loadReviewConfig;
 }
 
-export interface ExecuteReviewResult {
+export interface ReviewTypeExecutionResult {
   skipped: boolean;
   newFindings: number;
   stillOpen: number;
   fixed: number;
+  configurationResolved: number;
+  leftOpen: number;
+}
+
+export interface ExecuteReviewResult {
+  skipped: boolean;
+  code: ReviewTypeExecutionResult;
+  security: ReviewTypeExecutionResult;
+}
+
+export interface PreviousFindingPartition {
+  reviewable: ExistingFinding[];
+  configurationResolved: ExistingFinding[];
+  leftOpen: ExistingFinding[];
+}
+
+export function partitionPreviousFindings(
+  previousFindings: ExistingFinding[],
+  reviewType: ReviewType,
+  diff: ReviewDiff,
+  paths: string[],
+  policy: DisabledFindingsPolicy,
+): PreviousFindingPartition {
+  const partition: PreviousFindingPartition = {
+    reviewable: [],
+    configurationResolved: [],
+    leftOpen: [],
+  };
+  for (const finding of previousFindings) {
+    if (finding.reviewType !== reviewType) continue;
+    if (findingPathMatchesReviewPaths(finding.path, diff, paths)) {
+      partition.reviewable.push(finding);
+    } else if (policy === "review") {
+      partition.reviewable.push(finding);
+    } else if (policy === "resolve") {
+      partition.configurationResolved.push(finding);
+    } else {
+      partition.leftOpen.push(finding);
+    }
+  }
+  return partition;
 }
 
 function requireNonEmpty(value: string, name: string): void {
@@ -41,12 +93,13 @@ function requireNonEmpty(value: string, name: string): void {
 }
 
 function validateModelResult(
-  result: Awaited<ReturnType<ReviewAgentBoundary["run"]>>,
-  previous: ReturnType<typeof findOpenJanitorFindings>,
-  diff: Awaited<ReturnType<typeof collectReviewDiff>>,
+  reviewType: ReviewType,
+  result: ModelReviewResult,
+  previous: ExistingFinding[],
+  diff: ReviewDiff,
 ): void {
   if (result.general === undefined) {
-    throw new Error("Model review did not submit a general result");
+    throw new Error(`Model ${reviewType} review did not submit a general result`);
   }
   requireNonEmpty(result.general.summary, "summary");
   requireNonEmpty(result.general.mermaid, "Mermaid diagram");
@@ -86,6 +139,9 @@ function validateModelResult(
 
   const findingKeys = new Set<string>();
   for (const finding of result.findings) {
+    if (finding.reviewType !== reviewType) {
+      throw new Error(`Model ${reviewType} review returned a ${finding.reviewType} finding`);
+    }
     requireNonEmpty(finding.title, "finding title");
     requireNonEmpty(finding.body, "finding body");
     if (!["critical", "high", "medium", "low"].includes(finding.severity)) {
@@ -131,60 +187,150 @@ function validateModelResult(
   }
 }
 
+function emptyTypeResult(): ReviewTypeExecutionResult {
+  return {
+    skipped: true,
+    newFindings: 0,
+    stillOpen: 0,
+    fixed: 0,
+    configurationResolved: 0,
+    leftOpen: 0,
+  };
+}
+
+interface TypeState {
+  reviewType: ReviewType;
+  config: ReviewConfig[ReviewType];
+  diff: ReviewDiff;
+  previous: PreviousFindingPartition;
+}
+
+interface PreparedRun {
+  state: TypeState;
+  result: ModelReviewResult;
+  fixed: ModelReviewResult["dispositions"];
+  stillOpen: ModelReviewResult["dispositions"];
+  generalBody: string;
+}
+
 export async function executeReview(options: ExecuteReviewOptions): Promise<ExecuteReviewResult> {
   const config = await (options.configLoader ?? loadReviewConfig)(options.cwd);
   const diff = await collectReviewDiff(options.cwd, options.context, options.git);
-  if (diff.files.length === 0 || !shouldRunReview(diff.files, config.trackedPaths)) {
-    return { skipped: true, newFindings: 0, stillOpen: 0, fixed: 0 };
+  const scopedDiffs: Record<ReviewType, ReviewDiff> = {
+    code: filterReviewDiff(diff, config.code.paths),
+    security: filterReviewDiff(diff, config.security.paths),
+  };
+  const hasMatchedFiles = REVIEW_TYPES.some(
+    (reviewType) => scopedDiffs[reviewType].files.length > 0,
+  );
+  const needsDisabledFindingLookup = REVIEW_TYPES.some(
+    (reviewType) => config[reviewType].disabledFindings !== "leave_open",
+  );
+  if (!hasMatchedFiles && !needsDisabledFindingLookup) {
+    return { skipped: true, code: emptyTypeResult(), security: emptyTypeResult() };
   }
 
   const [comments, threads] = await Promise.all([
     options.github.listGeneralComments(),
     options.github.listReviewThreads(),
   ]);
-  const generalComment = findJanitorGeneralComment(comments);
   const previousFindings = findOpenJanitorFindings(threads);
-  const modelResult = await options.agent.run({
-    cwd: options.cwd,
-    context: options.context,
-    diff,
-    previousFindings,
-  });
-  validateModelResult(modelResult, previousFindings, diff);
-
-  const fixed = modelResult.dispositions.filter((disposition) => disposition.status === "fixed");
-  const stillOpen = modelResult.dispositions.filter(
-    (disposition) => disposition.status === "still_present",
+  const states = REVIEW_TYPES.map(
+    (reviewType): TypeState => ({
+      reviewType,
+      config: config[reviewType],
+      diff: scopedDiffs[reviewType],
+      previous: partitionPreviousFindings(
+        previousFindings,
+        reviewType,
+        diff,
+        config[reviewType].paths,
+        config[reviewType].disabledFindings,
+      ),
+    }),
   );
-  const generalBody = renderGeneralComment(modelResult.general!, {
-    newFindings: modelResult.findings.length,
-    stillOpen: stillOpen.length,
-    fixed: fixed.length,
-  });
-  if (generalBody.length > GITHUB_COMMENT_LIMIT) {
-    throw new Error("General review exceeds GitHub's comment size limit");
-  }
+  const runnableStates = states.filter(
+    (state) => state.diff.files.length > 0 || state.previous.reviewable.length > 0,
+  );
 
-  for (const finding of modelResult.findings) {
-    await options.github.createInlineComment(
-      finding,
-      renderFindingComment(finding),
-      options.context.headSha,
+  const modelResults = await Promise.all(
+    runnableStates.map((state) =>
+      options.agent.run({
+        reviewType: state.reviewType,
+        cwd: options.cwd,
+        context: options.context,
+        diff: state.diff,
+        previousFindings: state.previous.reviewable,
+      }),
+    ),
+  );
+  const preparedRuns = runnableStates.map((state, index): PreparedRun => {
+    const result = modelResults[index]!;
+    validateModelResult(state.reviewType, result, state.previous.reviewable, state.diff);
+    const fixed = result.dispositions.filter((disposition) => disposition.status === "fixed");
+    const stillOpen = result.dispositions.filter(
+      (disposition) => disposition.status === "still_present",
     );
+    const generalBody = renderGeneralComment(state.reviewType, result.general!, {
+      newFindings: result.findings.length,
+      stillOpen: stillOpen.length,
+      fixed: fixed.length,
+      configurationResolved: state.previous.configurationResolved.length,
+    });
+    if (generalBody.length > GITHUB_COMMENT_LIMIT) {
+      throw new Error(`General ${state.reviewType} review exceeds GitHub's comment size limit`);
+    }
+    return { state, result, fixed, stillOpen, generalBody };
+  });
+
+  for (const run of preparedRuns) {
+    for (const finding of run.result.findings) {
+      await options.github.createInlineComment(
+        finding,
+        renderFindingComment(finding),
+        options.context.headSha,
+      );
+    }
   }
-  for (const disposition of fixed) {
-    await options.github.resolveThread(disposition.threadId);
+  for (const run of preparedRuns) {
+    for (const disposition of run.fixed) {
+      await options.github.resolveThread(disposition.threadId);
+    }
   }
-  if (generalComment === undefined) {
-    await options.github.createGeneralComment(generalBody);
-  } else {
-    await options.github.updateGeneralComment(generalComment.id, generalBody);
+  for (const state of states) {
+    for (const finding of state.previous.configurationResolved) {
+      await options.github.resolveThread(finding.threadId);
+    }
+  }
+  for (const run of preparedRuns) {
+    const generalComment = findJanitorGeneralComment(comments, run.state.reviewType);
+    if (generalComment === undefined) {
+      await options.github.createGeneralComment(run.generalBody);
+    } else {
+      await options.github.updateGeneralComment(generalComment.id, run.generalBody);
+    }
   }
 
+  const typeResults = Object.fromEntries(
+    states.map((state) => {
+      const run = preparedRuns.find((candidate) => candidate.state.reviewType === state.reviewType);
+      const configurationResolved = state.previous.configurationResolved.length;
+      return [
+        state.reviewType,
+        {
+          skipped: run === undefined && configurationResolved === 0,
+          newFindings: run?.result.findings.length ?? 0,
+          stillOpen: run?.stillOpen.length ?? 0,
+          fixed: run?.fixed.length ?? 0,
+          configurationResolved,
+          leftOpen: state.previous.leftOpen.length,
+        } satisfies ReviewTypeExecutionResult,
+      ];
+    }),
+  ) as Record<ReviewType, ReviewTypeExecutionResult>;
   return {
-    skipped: false,
-    newFindings: modelResult.findings.length,
-    stillOpen: stillOpen.length,
-    fixed: fixed.length,
+    skipped: typeResults.code.skipped && typeResults.security.skipped,
+    code: typeResults.code,
+    security: typeResults.security,
   };
 }

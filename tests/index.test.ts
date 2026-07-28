@@ -53,7 +53,7 @@ describe("root CLI", () => {
 
     await expectExit(runCli({ argv: ["--version"], throwOnExit: true }), "version", 0);
 
-    expect(log).toHaveBeenCalledWith("0.0.0");
+    expect(log).toHaveBeenCalledWith("0.1.0");
   });
 
   it.each([

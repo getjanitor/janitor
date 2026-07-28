@@ -1,8 +1,18 @@
 # Janitor CLI version used by the generated GitHub Actions workflow.
 version = {= janitor_version | json_string =}
 
-[review]
-# Run a review when at least one changed path matches one of these glob patterns.
-tracked_paths = [
-{% for tracked_path in tracked_paths %}  {= tracked_path | json_string =}{% unless forloop.last %},{% endunless %}
+[review.code]
+# Files enabled for code review. An empty list disables this review type.
+paths = [
+{% for path in code_paths %}  {= path | json_string =}{% unless forloop.last %},{% endunless %}
 {% endfor %}]
+# Handling for existing findings whose files no longer match: leave_open, review, or resolve.
+disabled_findings = {= disabled_findings | json_string =}
+
+[review.security]
+# Files enabled for security review. An empty list disables this review type.
+paths = [
+{% for path in security_paths %}  {= path | json_string =}{% unless forloop.last %},{% endunless %}
+{% endfor %}]
+# Handling for existing findings whose files no longer match: leave_open, review, or resolve.
+disabled_findings = {= disabled_findings | json_string =}

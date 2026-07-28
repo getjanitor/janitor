@@ -1,9 +1,9 @@
 import { defineTool } from "@earendil-works/pi-coding-agent";
 import { Type } from "typebox";
 import { toolSuccess } from "#/harness/tools/github/result";
-import type { ModelReviewResult, NewFinding } from "#/review/types";
+import type { ModelReviewResult, NewFinding, ReviewType } from "#/review/types";
 
-export function createReportFindingTool(output: ModelReviewResult) {
+export function createReportFindingTool(reviewType: ReviewType, output: ModelReviewResult) {
   return defineTool({
     name: "report_finding",
     label: "Report finding",
@@ -23,7 +23,7 @@ export function createReportFindingTool(output: ModelReviewResult) {
       line: Type.Integer({ minimum: 1 }),
     }),
     execute: async (_toolCallId, params) => {
-      output.findings.push(params as NewFinding);
+      output.findings.push({ ...params, reviewType } as NewFinding);
       return toolSuccess("Finding recorded for validation after the review.");
     },
   });

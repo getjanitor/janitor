@@ -63,21 +63,33 @@ describe("init template rendering", () => {
     const rendered = await renderInitFiles({
       janitor_package: "@matfire/janitor@next",
       janitor_version: "next",
-      tracked_paths: ["src/**", 'a/quoted-"path"/**', "line\nbreak/**", "windows\\path/**"],
+      code_paths: ["src/**", 'a/quoted-"path"/**', "line\nbreak/**", "windows\\path/**"],
+      security_paths: ["security/**"],
+      disabled_findings: "leave_open",
     });
 
     expect(rendered.config)
       .toBe(`# Janitor CLI version used by the generated GitHub Actions workflow.
 version = "next"
 
-[review]
-# Run a review when at least one changed path matches one of these glob patterns.
-tracked_paths = [
+[review.code]
+# Files enabled for code review. An empty list disables this review type.
+paths = [
   "src/**",
   "a/quoted-\\"path\\"/**",
   "line\\nbreak/**",
   "windows\\\\path/**"
 ]
+# Handling for existing findings whose files no longer match: leave_open, review, or resolve.
+disabled_findings = "leave_open"
+
+[review.security]
+# Files enabled for security review. An empty list disables this review type.
+paths = [
+  "security/**"
+]
+# Handling for existing findings whose files no longer match: leave_open, review, or resolve.
+disabled_findings = "leave_open"
 `);
     expect(rendered.workflow).toContain('run: npx --yes "@matfire/janitor@next" review');
     expect(rendered.workflow).toContain("contents: read");
@@ -100,7 +112,9 @@ tracked_paths = [
     await expect(
       renderInitFiles({
         janitor_version: "latest",
-        tracked_paths: ["**"],
+        code_paths: ["**"],
+        security_paths: ["**"],
+        disabled_findings: "leave_open",
       } as never),
     ).rejects.toThrow(/janitor_package/u);
   });
