@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import { createReviewTools } from "#/harness/tools/github/index";
-import { RESERVED_JANITOR_MARKER_PREFIX } from "#/review/model_result";
+import { FINDING_MARKER, GENERAL_REVIEW_MARKER } from "#/review/markers";
 import type { ModelReviewResult, ReviewAgentInput } from "#/review/types";
 
 const input: ReviewAgentInput = {
@@ -94,7 +94,7 @@ describe("review agent tools", () => {
   it("rejects reserved markers without mutation and records corrected retries", async () => {
     const output: ModelReviewResult = { findings: [], dispositions: [], general: undefined };
     const { tools } = createReviewTools(input, output);
-    const marker = `${RESERVED_JANITOR_MARKER_PREFIX}finding:v1 -->`;
+    const marker = FINDING_MARKER;
 
     const unsafeFinding = {
       title: "Marker parsing is too broad",
@@ -152,7 +152,7 @@ describe("review agent tools", () => {
   });
 
   it("validates every model-authored text field before changing the result", async () => {
-    const marker = `${RESERVED_JANITOR_MARKER_PREFIX}general-review:v1 -->`;
+    const marker = GENERAL_REVIEW_MARKER;
     const finding = {
       title: "Issue",
       body: "Impact",

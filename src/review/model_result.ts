@@ -1,4 +1,4 @@
-export const RESERVED_JANITOR_MARKER_PREFIX = "<!-- janitor:";
+import { RESERVED_JANITOR_MARKER_PREFIX } from "#/review/markers";
 
 export function requireValidModelText(value: string, name: string): void {
   if (value.trim().length === 0) {

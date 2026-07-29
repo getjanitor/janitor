@@ -16,7 +16,7 @@ import {
   renderGeneralComment,
   renderReviewDescriptionStatus,
 } from "#/review/markers";
-import { RESERVED_JANITOR_MARKER_PREFIX } from "#/review/model_result";
+import { requireValidModelText } from "#/review/model_result";
 import { executeReview } from "#/review/orchestrator";
 import { readPullRequestContext, readReviewEnvironment } from "#/review/runtime";
 import type {
@@ -403,6 +403,20 @@ describe("Janitor markers and prompt", () => {
     ).toEqual([]);
   });
 
+  it("rejects every rendered Janitor marker as model-authored text", () => {
+    const markers = [
+      GENERAL_REVIEW_MARKER,
+      FINDING_MARKER,
+      renderReviewDescriptionStatus("head-sha", "running"),
+    ];
+
+    for (const marker of markers) {
+      expect(() => requireValidModelText(`Model output containing ${marker}`, "test text")).toThrow(
+        /reserved Janitor marker/u,
+      );
+    }
+  });
+
   it("renders and reconciles a single head-aware status block", () => {
     const running = renderReviewDescriptionStatus("head-sha", "running");
     expect(running).toContain(REVIEW_STATUS_MARKER);
@@ -657,7 +671,7 @@ describe("review reconciliation", () => {
           findings: [
             {
               title: "Marker parsing is too broad",
-              body: `The parser accepts ${RESERVED_JANITOR_MARKER_PREFIX}finding:v1 --> in review text.`,
+              body: `The parser accepts ${FINDING_MARKER} in review text.`,
               severity: "high",
               path: "src/a.ts",
               side: "RIGHT",
