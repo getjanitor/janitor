@@ -16,6 +16,7 @@ import {
   renderGeneralComment,
   renderReviewDescriptionStatus,
 } from "#/review/markers";
+import { requireValidModelText } from "#/review/model_result";
 import { executeReview } from "#/review/orchestrator";
 import { readPullRequestContext, readReviewEnvironment } from "#/review/runtime";
 import type {
@@ -402,6 +403,20 @@ describe("Janitor markers and prompt", () => {
     ).toEqual([]);
   });
 
+  it("rejects every rendered Janitor marker as model-authored text", () => {
+    const markers = [
+      GENERAL_REVIEW_MARKER,
+      FINDING_MARKER,
+      renderReviewDescriptionStatus("head-sha", "running"),
+    ];
+
+    for (const marker of markers) {
+      expect(() => requireValidModelText(`Model output containing ${marker}`, "test text")).toThrow(
+        /reserved Janitor marker/u,
+      );
+    }
+  });
+
   it("renders and reconciles a single head-aware status block", () => {
     const running = renderReviewDescriptionStatus("head-sha", "running");
     expect(running).toContain(REVIEW_STATUS_MARKER);
@@ -466,6 +481,8 @@ describe("Janitor markers and prompt", () => {
     expect(prompt).toContain("imports");
     expect(prompt).toContain("thread-1");
     expect(prompt).toContain("premature optimizations");
+    expect(prompt).toContain("Never reproduce a Janitor HTML marker prefix");
+    expect(prompt).toContain("&lt;");
     expect(prompt).toContain("submit_review exactly once");
   });
 });
@@ -643,6 +660,36 @@ describe("review reconciliation", () => {
     expect(github.createInlineComment).not.toHaveBeenCalled();
     expect(github.resolveThread).not.toHaveBeenCalled();
     expect(github.createGeneralComment).not.toHaveBeenCalled();
+    expect(github.updatePullRequestBody.mock.calls[1]?.[0]).toContain("❌ Janitor review failed");
+  });
+
+  it("rejects reserved markers before any review comment or thread mutation", async () => {
+    const github = githubBoundary({ previous: true, general: true });
+    await expect(
+      execute(
+        {
+          findings: [
+            {
+              title: "Marker parsing is too broad",
+              body: `The parser accepts ${FINDING_MARKER} in review text.`,
+              severity: "high",
+              path: "src/a.ts",
+              side: "RIGHT",
+              line: 2,
+            },
+          ],
+          dispositions: [
+            { threadId: "thread-1", status: "fixed", reason: "The old issue was removed." },
+          ],
+          general: cleanGeneral,
+        },
+        github,
+      ),
+    ).rejects.toThrow(/finding body contains a reserved Janitor marker/u);
+    expect(github.createInlineComment).not.toHaveBeenCalled();
+    expect(github.resolveThread).not.toHaveBeenCalled();
+    expect(github.createGeneralComment).not.toHaveBeenCalled();
+    expect(github.updateGeneralComment).not.toHaveBeenCalled();
     expect(github.updatePullRequestBody.mock.calls[1]?.[0]).toContain("❌ Janitor review failed");
   });
 

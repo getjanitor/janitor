@@ -1,8 +1,11 @@
 import type { ExistingFinding, GeneralReview, NewFinding } from "#/review/types";
 
-export const GENERAL_REVIEW_MARKER = "<!-- janitor:general-review:v1 -->";
-export const FINDING_MARKER = "<!-- janitor:finding:v1 -->";
-export const REVIEW_STATUS_MARKER = "janitor:review-status:v1";
+const JANITOR_MARKER_NAMESPACE = "janitor:";
+
+export const RESERVED_JANITOR_MARKER_PREFIX = `<!-- ${JANITOR_MARKER_NAMESPACE}`;
+export const GENERAL_REVIEW_MARKER = `${RESERVED_JANITOR_MARKER_PREFIX}general-review:v1 -->`;
+export const FINDING_MARKER = `${RESERVED_JANITOR_MARKER_PREFIX}finding:v1 -->`;
+export const REVIEW_STATUS_MARKER = `${JANITOR_MARKER_NAMESPACE}review-status:v1`;
 
 export type ReviewDescriptionStatus =
   | "running"

@@ -1,6 +1,7 @@
 import { defineTool } from "@earendil-works/pi-coding-agent";
 import { Type } from "typebox";
 import { toolSuccess } from "#/harness/tools/github/result";
+import { requireValidModelText } from "#/review/model_result";
 import type { ExistingFindingDisposition, ModelReviewResult } from "#/review/types";
 
 export function createDispositionExistingFindingTool(output: ModelReviewResult) {
@@ -13,15 +14,18 @@ export function createDispositionExistingFindingTool(output: ModelReviewResult) 
       threadId: Type.String({ description: "Exact previous thread ID from the prompt" }),
       status: Type.Union([Type.Literal("still_present"), Type.Literal("fixed")]),
       reason: Type.Optional(
-        Type.String({ description: "Required evidence explaining why a fixed issue is fixed" }),
+        Type.String({
+          description:
+            'Required evidence explaining why a fixed issue is fixed. Describe Janitor markers in words; never reproduce their reserved HTML prefix (escape "<" as "&lt;" if needed).',
+        }),
       ),
     }),
     execute: async (_toolCallId, params) => {
-      if (
-        params.status === "fixed" &&
-        (params.reason === undefined || params.reason.trim() === "")
-      ) {
-        throw new Error("A fixed disposition requires a reason");
+      if (params.status === "fixed") {
+        if (params.reason === undefined) {
+          throw new Error("A fixed disposition requires a reason");
+        }
+        requireValidModelText(params.reason, `fixed reason for ${params.threadId}`);
       }
       output.dispositions.push(params as ExistingFindingDisposition);
       return toolSuccess("Existing finding disposition recorded.");
