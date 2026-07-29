@@ -82,7 +82,7 @@ Configure all three values as **GitHub Actions secrets** in the repository:
 - `JANITOR_MODEL`
 - `JANITOR_PROVIDER_KEY`
 
-The generated pull-request workflow grants only `contents: read` and `pull-requests: write`. It uses `GITHUB_TOKEN` to post PR-level and diff comments, and it intentionally skips pull requests from forks because repository secrets and write access are unavailable to those runs.
+The generated pull-request workflow grants only `contents: read` and `pull-requests: write`. It uses `GITHUB_TOKEN` to post PR-level and diff comments, and it intentionally skips pull requests from forks because repository secrets and write access are unavailable to those runs. Runs are grouped by pull request and a newer event cancels an obsolete in-progress review.
 
 The selected `version` is rendered into the workflow when it is generated. Editing `version` in `janitor.toml` does not update an existing workflow; regenerate the workflow after changing it. A dedicated update command is planned but is not currently available.
 
@@ -97,6 +97,10 @@ janitor review
 `review` is PR-only. It reads the standard GitHub Actions pull-request event, verifies that the checkout is at the PR head, and compares the PR merge base with that head. Running it outside a pull-request Actions job, including as a local staged-change review, is not currently supported.
 
 Before invoking the model, Janitor loads `janitor.toml`. The review is skipped when none of the changed paths (including the old path of a rename) match `review.tracked_paths`. A match enables review of the complete PR diff.
+
+Janitor appends a marked status block to the pull request description while preserving its author-written content. The status shows when a review is running, completed, skipped, or failed. A completed 5/5-confidence review uses a thumbs-up indicator; other successful reviews use a checkmark.
+
+Detailed Actions logging is disabled by default. Enable it with either `janitor review --verbose` or `JANITOR_VERBOSE=1`. Verbose output reports review setup, diff collection, previous-feedback loading, validation, publication, and concise agent activity. Tool starts/results, retries, and context compaction are visible, but model narration and raw tool results are not emitted.
 
 The coding agent receives read-only repository search tools and the PR diff. It maps imports, callers, and usages; checks the changed code for correctness errors, typos, bad patterns, and missed or premature optimizations; and produces:
 

@@ -1,6 +1,7 @@
 import {
   createAgentSession,
   DefaultResourceLoader,
+  type AgentSessionEvent,
   getAgentDir,
   ModelRuntime,
   SessionManager,
@@ -64,11 +65,61 @@ Perform this workflow completely:
    not whether you liked it. End immediately after submit_review.`;
 }
 
+const TOOL_ACTIVITY: Record<string, string> = {
+  read: "reading a repository file",
+  grep: "searching repository text",
+  find: "finding repository paths",
+  ls: "listing a repository directory",
+  get_review_diff: "inspecting the pull request diff",
+  report_finding: "recording a new finding",
+  disposition_existing_finding: "re-evaluating an existing finding",
+  submit_review: "submitting the general review",
+};
+
+function toolActivity(toolName: string): string {
+  return TOOL_ACTIVITY[toolName] ?? "performing a repository operation";
+}
+
+export function formatAgentActivity(event: AgentSessionEvent): string | undefined {
+  switch (event.type) {
+    case "agent_start":
+      return "Agent session started.";
+    case "agent_end":
+      return event.willRetry ? "Agent session paused for a retry." : "Agent session finished.";
+    case "tool_execution_start":
+      return `Agent started ${toolActivity(event.toolName)}.`;
+    case "tool_execution_end":
+      return `Agent ${event.isError ? "failed while" : "finished"} ${toolActivity(event.toolName)}.`;
+    case "auto_retry_start":
+      return `Agent request retry ${event.attempt}/${event.maxAttempts} scheduled in ${event.delayMs}ms.`;
+    case "auto_retry_end":
+      return event.success ? "Agent request retry succeeded." : "Agent request retries exhausted.";
+    case "compaction_start":
+      return `Agent context compaction started (${event.reason}).`;
+    case "compaction_end":
+      return event.aborted
+        ? "Agent context compaction was aborted."
+        : event.result === undefined
+          ? "Agent context compaction failed."
+          : "Agent context compaction finished.";
+    case "summarization_retry_scheduled":
+      return `Agent summarization retry ${event.attempt}/${event.maxAttempts} scheduled in ${event.delayMs}ms.`;
+    case "summarization_retry_attempt_start":
+      return "Agent summarization retry started.";
+    case "summarization_retry_finished":
+      return "Agent summarization retry finished.";
+    default:
+      return undefined;
+  }
+}
+
 export class CodingReviewAgent implements ReviewAgentBoundary {
   readonly #environment: ReviewEnvironment;
+  readonly #report: (message: string) => void;
 
-  constructor(environment: ReviewEnvironment) {
+  constructor(environment: ReviewEnvironment, report: (message: string) => void = () => undefined) {
     this.#environment = environment;
+    this.#report = report;
   }
 
   async run(input: ReviewAgentInput): Promise<ModelReviewResult> {
@@ -116,10 +167,15 @@ export class CodingReviewAgent implements ReviewAgentBoundary {
       tools: ["read", "grep", "find", "ls", ...names],
       customTools: tools,
     });
+    const unsubscribe = session.subscribe((event) => {
+      const activity = formatAgentActivity(event);
+      if (activity !== undefined) this.#report(activity);
+    });
     try {
       await session.prompt(buildReviewPrompt(input));
       return output;
     } finally {
+      unsubscribe();
       session.dispose();
     }
   }

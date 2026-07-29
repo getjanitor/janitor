@@ -100,6 +100,8 @@ export interface ExistingGeneralComment {
 }
 
 export interface GitHubReviewBoundary {
+  getPullRequestBody(): Promise<string>;
+  updatePullRequestBody(body: string): Promise<void>;
   listGeneralComments(): Promise<Array<{ id: number; body: string; author: string | null }>>;
   listReviewThreads(): Promise<
     Array<{

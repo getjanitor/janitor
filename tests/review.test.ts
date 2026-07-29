@@ -2,15 +2,19 @@ import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { buildReviewPrompt } from "#/review/agent";
+import { review } from "#/commands/review";
+import { buildReviewPrompt, formatAgentActivity } from "#/review/agent";
 import { loadReviewConfig, shouldRunReview } from "#/review/config";
 import { collectReviewDiff, parseCommentableLines, parseNameStatus } from "#/review/git";
 import {
   FINDING_MARKER,
   GENERAL_REVIEW_MARKER,
+  REVIEW_STATUS_MARKER,
   findJanitorGeneralComment,
   findOpenJanitorFindings,
+  reconcileReviewDescription,
   renderGeneralComment,
+  renderReviewDescriptionStatus,
 } from "#/review/markers";
 import { executeReview } from "#/review/orchestrator";
 import { readPullRequestContext, readReviewEnvironment } from "#/review/runtime";
@@ -20,6 +24,7 @@ import type {
   ModelReviewResult,
   PullRequestContext,
   ReviewAgentBoundary,
+  ReviewEnvironment,
 } from "#/review/types";
 
 const temporaryDirectories: string[] = [];
@@ -62,10 +67,16 @@ function githubBoundary(
   options: {
     previous?: boolean;
     general?: boolean;
+    body?: string;
   } = {},
 ): GitHubReviewBoundary & Record<string, ReturnType<typeof vi.fn>> {
   const previous = options.previous ?? false;
+  let body = options.body ?? "Pull request description";
   return {
+    getPullRequestBody: vi.fn(async () => body),
+    updatePullRequestBody: vi.fn(async (updated: string) => {
+      body = updated;
+    }),
     listGeneralComments: vi.fn(async () =>
       options.general
         ? [
@@ -200,6 +211,81 @@ describe("review runtime and configuration", () => {
     ).toBe(true);
   });
 
+  it("threads the command reporter through orchestration and the coding agent factory", async () => {
+    const directory = await temporaryDirectory();
+    await writeFile(
+      join(directory, "janitor.toml"),
+      'version = "latest"\n[review]\ntracked_paths = ["src/**"]\n',
+    );
+    const reports: string[] = [];
+    const report = (message: string) => reports.push(message);
+    const createAgent = vi.fn((_environment: ReviewEnvironment, progress: typeof report) => {
+      expect(progress).toBe(report);
+      return agent({ findings: [], dispositions: [], general: cleanGeneral });
+    });
+
+    await review(
+      { verbose: true },
+      {
+        cwd: directory,
+        environment: {
+          GITHUB_TOKEN: "token",
+          GITHUB_EVENT_PATH: "/unused-event.json",
+          GITHUB_REPOSITORY: "owner/repo",
+          JANITOR_PROVIDER: "provider",
+          JANITOR_PROVIDER_KEY: "key",
+          JANITOR_MODEL: "model",
+        },
+        readContext: async () => context,
+        git: reviewGit(),
+        createAgent,
+        createGitHub: () => githubBoundary(),
+        report,
+      },
+    );
+
+    expect(createAgent).toHaveBeenCalledOnce();
+    expect(reports).toContain("Starting the coding review agent.");
+    expect(reports.at(-1)).toContain("Janitor review complete:");
+  });
+
+  it("keeps progress quiet by default and enables it with JANITOR_VERBOSE=1", async () => {
+    const directory = await temporaryDirectory();
+    await writeFile(
+      join(directory, "janitor.toml"),
+      'version = "latest"\n[review]\ntracked_paths = ["src/**"]\n',
+    );
+    const baseEnvironment = {
+      GITHUB_TOKEN: "token",
+      GITHUB_EVENT_PATH: "/unused-event.json",
+      GITHUB_REPOSITORY: "owner/repo",
+      JANITOR_PROVIDER: "provider",
+      JANITOR_PROVIDER_KEY: "key",
+      JANITOR_MODEL: "model",
+    };
+    const reports: string[] = [];
+    const dependencies = {
+      cwd: directory,
+      readContext: async () => context,
+      git: reviewGit(),
+      createAgent: () => agent({ findings: [], dispositions: [], general: cleanGeneral }),
+      createGitHub: () => githubBoundary(),
+      report: (message: string) => reports.push(message),
+    };
+
+    await review({}, { ...dependencies, environment: baseEnvironment });
+    expect(reports).toHaveLength(1);
+    expect(reports[0]).toContain("Janitor review complete:");
+
+    reports.length = 0;
+    await review(
+      {},
+      { ...dependencies, environment: { ...baseEnvironment, JANITOR_VERBOSE: "1" } },
+    );
+    expect(reports).toContain("Starting the coding review agent.");
+    expect(reports.at(-1)).toContain("Janitor review complete:");
+  });
+
   it("rejects malformed review configuration", async () => {
     const directory = await temporaryDirectory();
     await mkdir(directory, { recursive: true });
@@ -316,6 +402,39 @@ describe("Janitor markers and prompt", () => {
     ).toEqual([]);
   });
 
+  it("renders and reconciles a single head-aware status block", () => {
+    const running = renderReviewDescriptionStatus("head-sha", "running");
+    expect(running).toContain(REVIEW_STATUS_MARKER);
+    expect(running).toContain("head=head-sha");
+    expect(running).toContain("👀 Janitor review in progress");
+
+    const emptyBody = reconcileReviewDescription("", "head-sha", "running");
+    expect(emptyBody).toBe(running);
+
+    const original = "Title\n\nAuthor-written details.\n\n\n";
+    const withRunning = reconcileReviewDescription(original, "head-sha", "running");
+    const complete = reconcileReviewDescription(withRunning, "head-sha", "complete");
+    expect(withRunning.startsWith(original)).toBe(true);
+    expect(complete.startsWith(original)).toBe(true);
+    expect(complete).toContain("✅ Janitor review complete");
+    expect(complete.match(new RegExp(REVIEW_STATUS_MARKER, "gu"))).toHaveLength(2);
+  });
+
+  it("removes duplicate old status blocks and rejects stale terminal transitions", () => {
+    const authorBody = "Author content";
+    const duplicateBody = `${authorBody}\n\n${renderReviewDescriptionStatus("old-1", "failed")}\n\n${renderReviewDescriptionStatus("old-2", "running")}`;
+    const current = reconcileReviewDescription(duplicateBody, "new-head", "running");
+    expect(current).toContain(authorBody);
+    expect(current).not.toContain("old-1");
+    expect(current).not.toContain("old-2");
+    expect(current.match(new RegExp(REVIEW_STATUS_MARKER, "gu"))).toHaveLength(2);
+
+    expect(reconcileReviewDescription(current, "old-head", "complete")).toBe(current);
+    expect(reconcileReviewDescription(current, "new-head", "skipped")).toContain(
+      "⏭️ Janitor review skipped — no tracked paths changed",
+    );
+  });
+
   it("renders one marked general comment with diagram and confidence", () => {
     const body = renderGeneralComment(cleanGeneral, {
       newFindings: 0,
@@ -376,6 +495,29 @@ describe("review reconciliation", () => {
     expect(github.createInlineComment.mock.calls[0]?.[1]).toContain(FINDING_MARKER);
     expect(github.createGeneralComment).toHaveBeenCalledOnce();
     expect(github.updateGeneralComment).not.toHaveBeenCalled();
+    expect(github.getPullRequestBody).toHaveBeenCalledTimes(2);
+    expect(github.updatePullRequestBody).toHaveBeenCalledTimes(2);
+    expect(github.updatePullRequestBody.mock.calls[0]?.[0]).toContain(
+      "👀 Janitor review in progress",
+    );
+    expect(github.updatePullRequestBody.mock.calls[1]?.[0]).toContain("✅ Janitor review complete");
+  });
+
+  it("uses the maximum-confidence completion status for a 5/5 review", async () => {
+    const github = githubBoundary({ body: "Author content" });
+    await execute(
+      {
+        findings: [],
+        dispositions: [],
+        general: { ...cleanGeneral, confidence: 5 },
+      },
+      github,
+    );
+
+    expect(github.updatePullRequestBody.mock.calls[1]?.[0]).toContain(
+      "👍 Janitor review complete — confidence 5/5",
+    );
+    expect(github.updatePullRequestBody.mock.calls[1]?.[0]).toContain("Author content");
   });
 
   it("leaves a reproduced thread open without posting a duplicate", async () => {
@@ -433,9 +575,10 @@ describe("review reconciliation", () => {
     expect(github.createInlineComment).not.toHaveBeenCalled();
     expect(github.resolveThread).not.toHaveBeenCalled();
     expect(github.createGeneralComment).not.toHaveBeenCalled();
+    expect(github.updatePullRequestBody.mock.calls[1]?.[0]).toContain("❌ Janitor review failed");
   });
 
-  it("skips before GitHub or model access when tracked paths do not match", async () => {
+  it("skips before GitHub feedback or model access when tracked paths do not match", async () => {
     const github = githubBoundary();
     const reviewAgent = agent({ findings: [], dispositions: [], general: cleanGeneral });
     const result = await executeReview({
@@ -449,5 +592,123 @@ describe("review reconciliation", () => {
     expect(result.skipped).toBe(true);
     expect(github.listGeneralComments).not.toHaveBeenCalled();
     expect(reviewAgent.run).not.toHaveBeenCalled();
+    expect(github.getPullRequestBody).toHaveBeenCalledTimes(2);
+    expect(github.updatePullRequestBody.mock.calls[1]?.[0]).toContain(
+      "⏭️ Janitor review skipped — no tracked paths changed",
+    );
+  });
+
+  it("reports lifecycle progress in order", async () => {
+    const messages: string[] = [];
+    await executeReview({
+      cwd: "/repo",
+      context,
+      git: reviewGit(),
+      github: githubBoundary(),
+      agent: agent({ findings: [], dispositions: [], general: cleanGeneral }),
+      configLoader: async () => ({ trackedPaths: ["src/**"] }),
+      report: (message) => messages.push(message),
+    });
+
+    expect(messages).toEqual(
+      expect.arrayContaining([
+        expect.stringContaining("collecting the pull request diff"),
+        expect.stringContaining("Loading previous Janitor feedback"),
+        expect.stringContaining("Starting the coding review agent"),
+        expect.stringContaining("validating its output"),
+        expect.stringContaining("Publishing validated review feedback"),
+      ]),
+    );
+    expect(messages.indexOf("Starting the coding review agent.")).toBeLessThan(
+      messages.indexOf("Coding review agent finished; validating its output."),
+    );
+    expect(messages.indexOf("Agent output validated successfully.")).toBeLessThan(
+      messages.indexOf("Publishing validated review feedback to GitHub."),
+    );
+  });
+
+  it("keeps the original review error when failed-status publication also fails", async () => {
+    const github = githubBoundary();
+    github.updatePullRequestBody
+      .mockResolvedValueOnce(undefined)
+      .mockRejectedValueOnce(new Error("status update failed"));
+    const original = new Error("agent failed");
+    const failingAgent: ReviewAgentBoundary = { run: vi.fn(async () => Promise.reject(original)) };
+    const messages: string[] = [];
+
+    await expect(
+      executeReview({
+        cwd: "/repo",
+        context,
+        git: reviewGit(),
+        github,
+        agent: failingAgent,
+        configLoader: async () => ({ trackedPaths: ["src/**"] }),
+        report: (message) => messages.push(message),
+      }),
+    ).rejects.toBe(original);
+    expect(messages).toContain(
+      "Unable to publish the failed pull request status: status update failed",
+    );
+  });
+
+  it("does not replace a newer head's running status with a stale completion", async () => {
+    const github = githubBoundary({ body: "Author content" });
+    github.getPullRequestBody
+      .mockResolvedValueOnce("Author content")
+      .mockResolvedValueOnce(reconcileReviewDescription("Author content", "newer-head", "running"));
+
+    await execute({ findings: [], dispositions: [], general: cleanGeneral }, github);
+
+    expect(github.updatePullRequestBody).toHaveBeenCalledTimes(1);
+    expect(github.updatePullRequestBody.mock.calls[0]?.[0]).toContain(
+      "👀 Janitor review in progress",
+    );
+  });
+});
+
+describe("safe agent progress", () => {
+  it("reports tool lifecycle without including arguments or results", () => {
+    const started = formatAgentActivity({
+      type: "tool_execution_start",
+      toolCallId: "call",
+      toolName: "read",
+      args: { path: "secret-file.ts", content: "do not log" },
+    } as never);
+    const failed = formatAgentActivity({
+      type: "tool_execution_end",
+      toolCallId: "call",
+      toolName: "grep",
+      result: { content: "do not log" },
+      isError: true,
+    } as never);
+
+    expect(started).toBe("Agent started reading a repository file.");
+    expect(started).not.toContain("secret-file.ts");
+    expect(failed).toBe("Agent failed while searching repository text.");
+    expect(failed).not.toContain("do not log");
+  });
+
+  it("reports retries and compaction without provider error contents", () => {
+    const retry = formatAgentActivity({
+      type: "auto_retry_start",
+      attempt: 1,
+      maxAttempts: 3,
+      delayMs: 500,
+      errorMessage: "credential-shaped provider detail",
+    } as never);
+    const compacted = formatAgentActivity({
+      type: "compaction_end",
+      reason: "threshold",
+      result: {},
+      aborted: false,
+      willRetry: false,
+      errorMessage: "private context detail",
+    } as never);
+
+    expect(retry).toBe("Agent request retry 1/3 scheduled in 500ms.");
+    expect(retry).not.toContain("credential-shaped");
+    expect(compacted).toBe("Agent context compaction finished.");
+    expect(formatAgentActivity({ type: "message_update" } as never)).toBeUndefined();
   });
 });

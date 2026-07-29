@@ -1,6 +1,7 @@
 import { stripVTControlCharacters } from "node:util";
 import { CleyeExit } from "cleye";
 import { afterEach, describe, expect, it, vi } from "vitest";
+import packageJson from "../package.json" with { type: "json" };
 import { runCli } from "#/cli";
 import { runInitCommand } from "#/commands/init";
 import { runReviewCommand } from "#/commands/review";
@@ -53,7 +54,7 @@ describe("root CLI", () => {
 
     await expectExit(runCli({ argv: ["--version"], throwOnExit: true }), "version", 0);
 
-    expect(log).toHaveBeenCalledWith("0.0.0");
+    expect(log).toHaveBeenCalledWith(packageJson.version);
   });
 
   it.each([
@@ -115,13 +116,14 @@ describe("command actions", () => {
     });
   });
 
-  it("routes the review command without options", async () => {
+  it("routes review verbosity options", async () => {
     const action = vi.fn();
 
     await runReviewCommand(action, []);
+    await runReviewCommand(action, ["--verbose"]);
 
-    expect(action).toHaveBeenCalledOnce();
-    expect(action).toHaveBeenCalledWith();
+    expect(action).toHaveBeenNthCalledWith(1, { verbose: false });
+    expect(action).toHaveBeenNthCalledWith(2, { verbose: true });
   });
 
   it("does not require environment secrets while parsing the review command", async () => {
@@ -129,6 +131,6 @@ describe("command actions", () => {
 
     await runReviewCommand(action, []);
 
-    expect(action).toHaveBeenCalledOnce();
+    expect(action).toHaveBeenCalledWith({ verbose: false });
   });
 });
