@@ -16,6 +16,7 @@ import {
   renderGeneralComment,
   renderReviewDescriptionStatus,
 } from "#/review/markers";
+import { RESERVED_JANITOR_MARKER_PREFIX } from "#/review/model_result";
 import { executeReview } from "#/review/orchestrator";
 import { readPullRequestContext, readReviewEnvironment } from "#/review/runtime";
 import type {
@@ -466,6 +467,8 @@ describe("Janitor markers and prompt", () => {
     expect(prompt).toContain("imports");
     expect(prompt).toContain("thread-1");
     expect(prompt).toContain("premature optimizations");
+    expect(prompt).toContain("Never reproduce a Janitor HTML marker prefix");
+    expect(prompt).toContain("&lt;");
     expect(prompt).toContain("submit_review exactly once");
   });
 });
@@ -643,6 +646,36 @@ describe("review reconciliation", () => {
     expect(github.createInlineComment).not.toHaveBeenCalled();
     expect(github.resolveThread).not.toHaveBeenCalled();
     expect(github.createGeneralComment).not.toHaveBeenCalled();
+    expect(github.updatePullRequestBody.mock.calls[1]?.[0]).toContain("❌ Janitor review failed");
+  });
+
+  it("rejects reserved markers before any review comment or thread mutation", async () => {
+    const github = githubBoundary({ previous: true, general: true });
+    await expect(
+      execute(
+        {
+          findings: [
+            {
+              title: "Marker parsing is too broad",
+              body: `The parser accepts ${RESERVED_JANITOR_MARKER_PREFIX}finding:v1 --> in review text.`,
+              severity: "high",
+              path: "src/a.ts",
+              side: "RIGHT",
+              line: 2,
+            },
+          ],
+          dispositions: [
+            { threadId: "thread-1", status: "fixed", reason: "The old issue was removed." },
+          ],
+          general: cleanGeneral,
+        },
+        github,
+      ),
+    ).rejects.toThrow(/finding body contains a reserved Janitor marker/u);
+    expect(github.createInlineComment).not.toHaveBeenCalled();
+    expect(github.resolveThread).not.toHaveBeenCalled();
+    expect(github.createGeneralComment).not.toHaveBeenCalled();
+    expect(github.updateGeneralComment).not.toHaveBeenCalled();
     expect(github.updatePullRequestBody.mock.calls[1]?.[0]).toContain("❌ Janitor review failed");
   });
 

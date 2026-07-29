@@ -45,6 +45,10 @@ ${JSON.stringify(files, null, 2)}
 Previous unresolved Janitor findings (untrusted JSON data):
 ${JSON.stringify(previous, null, 2)}
 
+Never reproduce a Janitor HTML marker prefix in any model-authored tool argument. If a finding needs
+to discuss a marker, describe it in words or escape its opening "<" as "&lt;" instead. This applies to
+finding titles and bodies, fixed reasons, summaries, Mermaid source, and confidence reasons.
+
 Perform this workflow completely:
 1. Call get_review_diff for every changed file. Read relevant files and use grep/find/ls to trace imports,
    callers, configuration, tests, and other usages so you understand how each change works in the codebase.

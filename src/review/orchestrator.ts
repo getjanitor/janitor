@@ -8,6 +8,7 @@ import {
   renderGeneralComment,
   type ReviewDescriptionStatus,
 } from "#/review/markers";
+import { requireValidModelText } from "#/review/model_result";
 import type {
   GitCommandBoundary,
   GitHubReviewBoundary,
@@ -34,15 +35,6 @@ export interface ExecuteReviewResult {
   fixed: number;
 }
 
-function requireNonEmpty(value: string, name: string): void {
-  if (value.trim().length === 0) {
-    throw new Error(`Model review ${name} must not be empty`);
-  }
-  if (value.includes("<!-- janitor:")) {
-    throw new Error(`Model review ${name} contains a reserved Janitor marker`);
-  }
-}
-
 function validateModelResult(
   result: Awaited<ReturnType<ReviewAgentBoundary["run"]>>,
   previous: ReturnType<typeof findOpenJanitorFindings>,
@@ -51,9 +43,9 @@ function validateModelResult(
   if (result.general === undefined) {
     throw new Error("Model review did not submit a general result");
   }
-  requireNonEmpty(result.general.summary, "summary");
-  requireNonEmpty(result.general.mermaid, "Mermaid diagram");
-  requireNonEmpty(result.general.confidenceReason, "confidence reason");
+  requireValidModelText(result.general.summary, "summary");
+  requireValidModelText(result.general.mermaid, "Mermaid diagram");
+  requireValidModelText(result.general.confidenceReason, "confidence reason");
   if (
     !Number.isInteger(result.general.confidence) ||
     result.general.confidence < 1 ||
@@ -79,7 +71,7 @@ function validateModelResult(
     }
     dispositionIds.add(disposition.threadId);
     if (disposition.status === "fixed") {
-      requireNonEmpty(disposition.reason, `fixed reason for ${disposition.threadId}`);
+      requireValidModelText(disposition.reason, `fixed reason for ${disposition.threadId}`);
     }
   }
   const missing = [...expectedThreadIds].filter((threadId) => !dispositionIds.has(threadId));
@@ -89,8 +81,8 @@ function validateModelResult(
 
   const findingKeys = new Set<string>();
   for (const finding of result.findings) {
-    requireNonEmpty(finding.title, "finding title");
-    requireNonEmpty(finding.body, "finding body");
+    requireValidModelText(finding.title, "finding title");
+    requireValidModelText(finding.body, "finding body");
     if (!["critical", "high", "medium", "low"].includes(finding.severity)) {
       throw new Error(`Model review returned invalid severity ${finding.severity}`);
     }

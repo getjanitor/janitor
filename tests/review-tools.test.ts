@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest";
 import { createReviewTools } from "#/harness/tools/github/index";
+import { RESERVED_JANITOR_MARKER_PREFIX } from "#/review/model_result";
 import type { ModelReviewResult, ReviewAgentInput } from "#/review/types";
 
 const input: ReviewAgentInput = {
@@ -88,5 +89,118 @@ describe("review agent tools", () => {
     };
     await execute(tools, "submit_review", general);
     await expect(execute(tools, "submit_review", general)).rejects.toThrow(/only be called once/u);
+  });
+
+  it("rejects reserved markers without mutation and records corrected retries", async () => {
+    const output: ModelReviewResult = { findings: [], dispositions: [], general: undefined };
+    const { tools } = createReviewTools(input, output);
+    const marker = `${RESERVED_JANITOR_MARKER_PREFIX}finding:v1 -->`;
+
+    const unsafeFinding = {
+      title: "Marker parsing is too broad",
+      body: `The parser accepts ${marker} in model-authored text.`,
+      severity: "high",
+      path: "src/a.ts",
+      side: "RIGHT",
+      line: 1,
+    };
+    await expect(execute(tools, "report_finding", unsafeFinding)).rejects.toThrow(
+      /reserved Janitor marker.*escape/u,
+    );
+    expect(output.findings).toEqual([]);
+    await execute(tools, "report_finding", {
+      ...unsafeFinding,
+      body: "The parser accepts &lt;!-- janitor:finding:v1 --> in model-authored text.",
+    });
+
+    await expect(
+      execute(tools, "disposition_existing_finding", {
+        threadId: "thread",
+        status: "fixed",
+        reason: `Removed ${marker}`,
+      }),
+    ).rejects.toThrow(/reserved Janitor marker.*escape/u);
+    expect(output.dispositions).toEqual([]);
+    await execute(tools, "disposition_existing_finding", {
+      threadId: "thread",
+      status: "fixed",
+      reason: "Removed the reserved marker handling.",
+    });
+
+    const unsafeGeneral = {
+      summary: `Updated ${marker}`,
+      mermaid: "flowchart LR\nA --> B",
+      confidence: 4,
+      confidenceReason: "Inspected all callers",
+    };
+    await expect(execute(tools, "submit_review", unsafeGeneral)).rejects.toThrow(
+      /reserved Janitor marker.*escape/u,
+    );
+    expect(output.general).toBeUndefined();
+    await execute(tools, "submit_review", {
+      ...unsafeGeneral,
+      summary: "Updated the marker handling.",
+    });
+
+    expect(output.findings).toMatchObject([
+      { body: "The parser accepts &lt;!-- janitor:finding:v1 --> in model-authored text." },
+    ]);
+    expect(output.dispositions).toEqual([
+      { threadId: "thread", status: "fixed", reason: "Removed the reserved marker handling." },
+    ]);
+    expect(output.general).toMatchObject({ summary: "Updated the marker handling." });
+  });
+
+  it("validates every model-authored text field before changing the result", async () => {
+    const marker = `${RESERVED_JANITOR_MARKER_PREFIX}general-review:v1 -->`;
+    const finding = {
+      title: "Issue",
+      body: "Impact",
+      severity: "high",
+      path: "src/a.ts",
+      side: "RIGHT",
+      line: 1,
+    };
+    const general = {
+      summary: "Summary",
+      mermaid: "flowchart LR\nA --> B",
+      confidence: 4,
+      confidenceReason: "Reason",
+    };
+    const cases = [
+      { name: "report_finding", params: { ...finding, title: "   " }, error: /must not be empty/u },
+      {
+        name: "report_finding",
+        params: { ...finding, body: `Impact from ${marker}` },
+        error: /reserved Janitor marker/u,
+      },
+      {
+        name: "disposition_existing_finding",
+        params: { threadId: "thread", status: "fixed", reason: `Removed ${marker}` },
+        error: /reserved Janitor marker/u,
+      },
+      {
+        name: "submit_review",
+        params: { ...general, summary: `Summary of ${marker}` },
+        error: /reserved Janitor marker/u,
+      },
+      {
+        name: "submit_review",
+        params: { ...general, mermaid: `flowchart LR\nA[${marker}] --> B` },
+        error: /reserved Janitor marker/u,
+      },
+      {
+        name: "submit_review",
+        params: { ...general, confidenceReason: `Checked ${marker}` },
+        error: /reserved Janitor marker/u,
+      },
+    ];
+
+    for (const testCase of cases) {
+      const output: ModelReviewResult = { findings: [], dispositions: [], general: undefined };
+      const { tools } = createReviewTools(input, output);
+      await expect(execute(tools, testCase.name, testCase.params)).rejects.toThrow(testCase.error);
+      expect(output).toEqual({ findings: [], dispositions: [], general: undefined });
+    }
   });
 });
