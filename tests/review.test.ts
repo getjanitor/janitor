@@ -503,6 +503,29 @@ describe("review reconciliation", () => {
     expect(github.updatePullRequestBody.mock.calls[1]?.[0]).toContain("✅ Janitor review complete");
   });
 
+  it("continues the review when the running status cannot be published", async () => {
+    const github = githubBoundary();
+    github.getPullRequestBody.mockRejectedValueOnce(new Error("status unavailable"));
+    const reviewAgent = agent({ findings: [], dispositions: [], general: cleanGeneral });
+    const messages: string[] = [];
+
+    const result = await executeReview({
+      cwd: "/repo",
+      context,
+      git: reviewGit(),
+      github,
+      agent: reviewAgent,
+      configLoader: async () => ({ trackedPaths: ["src/**"] }),
+      report: (message) => messages.push(message),
+    });
+
+    expect(result).toEqual({ skipped: false, newFindings: 0, stillOpen: 0, fixed: 0 });
+    expect(reviewAgent.run).toHaveBeenCalledOnce();
+    expect(github.createGeneralComment).toHaveBeenCalledOnce();
+    expect(github.updatePullRequestBody).toHaveBeenCalledOnce();
+    expect(messages).toContain("Unable to publish pull request running status: status unavailable");
+  });
+
   it("uses the maximum-confidence completion status for a 5/5 review", async () => {
     const github = githubBoundary({ body: "Author content" });
     await execute(
@@ -518,6 +541,51 @@ describe("review reconciliation", () => {
       "👍 Janitor review complete — confidence 5/5",
     );
     expect(github.updatePullRequestBody.mock.calls[1]?.[0]).toContain("Author content");
+  });
+
+  it("keeps a published review successful when the completion status fails", async () => {
+    const github = githubBoundary({ body: "Author content" });
+    const runningBody = reconcileReviewDescription("Author content", context.headSha, "running");
+    github.getPullRequestBody
+      .mockResolvedValueOnce("Author content")
+      .mockResolvedValueOnce(runningBody);
+    github.updatePullRequestBody
+      .mockResolvedValueOnce(undefined)
+      .mockRejectedValueOnce(new Error("status unavailable"));
+    const messages: string[] = [];
+
+    const result = await executeReview({
+      cwd: "/repo",
+      context,
+      git: reviewGit(),
+      github,
+      agent: agent({
+        findings: [
+          {
+            title: "Incorrect replacement",
+            body: "This changes the behavior unexpectedly.",
+            severity: "high",
+            path: "src/a.ts",
+            side: "RIGHT",
+            line: 2,
+          },
+        ],
+        dispositions: [],
+        general: cleanGeneral,
+      }),
+      configLoader: async () => ({ trackedPaths: ["src/**"] }),
+      report: (message) => messages.push(message),
+    });
+
+    expect(result).toEqual({ skipped: false, newFindings: 1, stillOpen: 0, fixed: 0 });
+    expect(github.createInlineComment).toHaveBeenCalledOnce();
+    expect(github.createGeneralComment).toHaveBeenCalledOnce();
+    expect(github.getPullRequestBody).toHaveBeenCalledTimes(2);
+    expect(github.updatePullRequestBody).toHaveBeenCalledTimes(2);
+    expect(messages).toContain(
+      "Unable to publish pull request complete status: status unavailable",
+    );
+    expect(messages).not.toContain("Pull request status set to failed.");
   });
 
   it("leaves a reproduced thread open without posting a duplicate", async () => {
@@ -598,6 +666,30 @@ describe("review reconciliation", () => {
     );
   });
 
+  it("returns skipped when the skipped status cannot be published", async () => {
+    const github = githubBoundary();
+    github.updatePullRequestBody
+      .mockResolvedValueOnce(undefined)
+      .mockRejectedValueOnce(new Error("status unavailable"));
+    const reviewAgent = agent({ findings: [], dispositions: [], general: cleanGeneral });
+    const messages: string[] = [];
+
+    const result = await executeReview({
+      cwd: "/repo",
+      context,
+      git: reviewGit("docs/a.md"),
+      github,
+      agent: reviewAgent,
+      configLoader: async () => ({ trackedPaths: ["src/**"] }),
+      report: (message) => messages.push(message),
+    });
+
+    expect(result).toEqual({ skipped: true, newFindings: 0, stillOpen: 0, fixed: 0 });
+    expect(reviewAgent.run).not.toHaveBeenCalled();
+    expect(github.updatePullRequestBody).toHaveBeenCalledTimes(2);
+    expect(messages).toContain("Unable to publish pull request skipped status: status unavailable");
+  });
+
   it("reports lifecycle progress in order", async () => {
     const messages: string[] = [];
     await executeReview({
@@ -648,7 +740,7 @@ describe("review reconciliation", () => {
       }),
     ).rejects.toBe(original);
     expect(messages).toContain(
-      "Unable to publish the failed pull request status: status update failed",
+      "Unable to publish pull request failed status: status update failed",
     );
   });
 

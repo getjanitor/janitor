@@ -134,15 +134,23 @@ function validateModelResult(
   }
 }
 
+type DescriptionStatusPublication = "updated" | "unchanged" | "failed";
+
 async function publishDescriptionStatus(
   options: ExecuteReviewOptions,
   status: ReviewDescriptionStatus,
-): Promise<boolean> {
-  const body = await options.github.getPullRequestBody();
-  const updated = reconcileReviewDescription(body, options.context.headSha, status);
-  if (updated === body) return false;
-  await options.github.updatePullRequestBody(updated);
-  return true;
+  report: (message: string) => void,
+): Promise<DescriptionStatusPublication> {
+  try {
+    const body = await options.github.getPullRequestBody();
+    const updated = reconcileReviewDescription(body, options.context.headSha, status);
+    if (updated === body) return "unchanged";
+    await options.github.updatePullRequestBody(updated);
+    return "updated";
+  } catch (error) {
+    report(`Unable to publish pull request ${status} status: ${errorMessage(error)}`);
+    return "failed";
+  }
 }
 
 function errorMessage(error: unknown): string {
@@ -154,8 +162,9 @@ export async function executeReview(options: ExecuteReviewOptions): Promise<Exec
 
   try {
     report(`Starting Janitor review for pull request #${options.context.number}.`);
-    await publishDescriptionStatus(options, "running");
-    report("Pull request status set to running.");
+    const runningStatus = await publishDescriptionStatus(options, "running", report);
+    if (runningStatus === "updated") report("Pull request status set to running.");
+    if (runningStatus === "unchanged") report("Pull request status already running.");
 
     report("Loading review configuration and collecting the pull request diff.");
     const config = await (options.configLoader ?? loadReviewConfig)(options.cwd);
@@ -163,8 +172,9 @@ export async function executeReview(options: ExecuteReviewOptions): Promise<Exec
     report(`Collected ${diff.files.length} changed file(s).`);
     if (diff.files.length === 0 || !shouldRunReview(diff.files, config.trackedPaths)) {
       report("No changed path matched review.tracked_paths; skipping agent review.");
-      await publishDescriptionStatus(options, "skipped");
-      report("Pull request status set to skipped.");
+      const skippedStatus = await publishDescriptionStatus(options, "skipped", report);
+      if (skippedStatus === "updated") report("Pull request status set to skipped.");
+      if (skippedStatus === "unchanged") report("Pull request skipped status unchanged.");
       return { skipped: true, newFindings: 0, stillOpen: 0, fixed: 0 };
     }
 
@@ -221,12 +231,11 @@ export async function executeReview(options: ExecuteReviewOptions): Promise<Exec
 
     const completionStatus =
       modelResult.general!.confidence === 5 ? "complete-max-confidence" : "complete";
-    const statusUpdated = await publishDescriptionStatus(options, completionStatus);
-    report(
-      statusUpdated
-        ? "Pull request status set to complete."
-        : "Skipped a stale pull request status update for another head.",
-    );
+    const completionPublication = await publishDescriptionStatus(options, completionStatus, report);
+    if (completionPublication === "updated") report("Pull request status set to complete.");
+    if (completionPublication === "unchanged") {
+      report("Skipped a stale pull request status update for another head.");
+    }
 
     return {
       skipped: false,
@@ -236,15 +245,10 @@ export async function executeReview(options: ExecuteReviewOptions): Promise<Exec
     };
   } catch (error) {
     report(`Janitor review failed: ${errorMessage(error)}`);
-    try {
-      const statusUpdated = await publishDescriptionStatus(options, "failed");
-      report(
-        statusUpdated
-          ? "Pull request status set to failed."
-          : "Skipped a stale failed-status update for another head.",
-      );
-    } catch (statusError) {
-      report(`Unable to publish the failed pull request status: ${errorMessage(statusError)}`);
+    const failedStatus = await publishDescriptionStatus(options, "failed", report);
+    if (failedStatus === "updated") report("Pull request status set to failed.");
+    if (failedStatus === "unchanged") {
+      report("Skipped a stale failed-status update for another head.");
     }
     throw error;
   }
