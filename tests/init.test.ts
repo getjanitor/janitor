@@ -82,6 +82,8 @@ tracked_paths = [
     expect(rendered.workflow).toContain('run: npx --yes "@matfire/janitor@next" review');
     expect(rendered.workflow).toContain("contents: read");
     expect(rendered.workflow).toContain("pull-requests: write");
+    expect(rendered.workflow).toContain("group: janitor-${{ github.event.pull_request.number }}");
+    expect(rendered.workflow).toContain("cancel-in-progress: true");
     expect(rendered.workflow).toContain(
       "github.event.pull_request.head.repo.full_name == github.repository",
     );

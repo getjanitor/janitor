@@ -100,6 +100,24 @@ export class GitHubReviewClient implements GitHubReviewBoundary {
     this.#context = options.context;
   }
 
+  async getPullRequestBody(): Promise<string> {
+    const response = await this.#octokit.rest.pulls.get({
+      owner: this.#context.owner,
+      repo: this.#context.repo,
+      pull_number: this.#context.number,
+    });
+    return response.data.body ?? "";
+  }
+
+  async updatePullRequestBody(body: string): Promise<void> {
+    await this.#octokit.rest.pulls.update({
+      owner: this.#context.owner,
+      repo: this.#context.repo,
+      pull_number: this.#context.number,
+      body,
+    });
+  }
+
   async listGeneralComments() {
     const comments = await this.#octokit.paginate(this.#octokit.rest.issues.listComments, {
       owner: this.#context.owner,

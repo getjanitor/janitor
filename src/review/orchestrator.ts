@@ -3,8 +3,10 @@ import { collectReviewDiff, isCommentableLocation } from "#/review/git";
 import {
   findJanitorGeneralComment,
   findOpenJanitorFindings,
+  reconcileReviewDescription,
   renderFindingComment,
   renderGeneralComment,
+  type ReviewDescriptionStatus,
 } from "#/review/markers";
 import type {
   GitCommandBoundary,
@@ -22,6 +24,7 @@ export interface ExecuteReviewOptions {
   github: GitHubReviewBoundary;
   agent: ReviewAgentBoundary;
   configLoader?: typeof loadReviewConfig;
+  report?: (message: string) => void;
 }
 
 export interface ExecuteReviewResult {
@@ -131,60 +134,122 @@ function validateModelResult(
   }
 }
 
+type DescriptionStatusPublication = "updated" | "unchanged" | "failed";
+
+async function publishDescriptionStatus(
+  options: ExecuteReviewOptions,
+  status: ReviewDescriptionStatus,
+  report: (message: string) => void,
+): Promise<DescriptionStatusPublication> {
+  try {
+    const body = await options.github.getPullRequestBody();
+    const updated = reconcileReviewDescription(body, options.context.headSha, status);
+    if (updated === body) return "unchanged";
+    await options.github.updatePullRequestBody(updated);
+    return "updated";
+  } catch (error) {
+    report(`Unable to publish pull request ${status} status: ${errorMessage(error)}`);
+    return "failed";
+  }
+}
+
+function errorMessage(error: unknown): string {
+  return error instanceof Error ? error.message : String(error);
+}
+
 export async function executeReview(options: ExecuteReviewOptions): Promise<ExecuteReviewResult> {
-  const config = await (options.configLoader ?? loadReviewConfig)(options.cwd);
-  const diff = await collectReviewDiff(options.cwd, options.context, options.git);
-  if (diff.files.length === 0 || !shouldRunReview(diff.files, config.trackedPaths)) {
-    return { skipped: true, newFindings: 0, stillOpen: 0, fixed: 0 };
-  }
+  const report = options.report ?? (() => undefined);
 
-  const [comments, threads] = await Promise.all([
-    options.github.listGeneralComments(),
-    options.github.listReviewThreads(),
-  ]);
-  const generalComment = findJanitorGeneralComment(comments);
-  const previousFindings = findOpenJanitorFindings(threads);
-  const modelResult = await options.agent.run({
-    cwd: options.cwd,
-    context: options.context,
-    diff,
-    previousFindings,
-  });
-  validateModelResult(modelResult, previousFindings, diff);
+  try {
+    report(`Starting Janitor review for pull request #${options.context.number}.`);
+    const runningStatus = await publishDescriptionStatus(options, "running", report);
+    if (runningStatus === "updated") report("Pull request status set to running.");
+    if (runningStatus === "unchanged") report("Pull request status already running.");
 
-  const fixed = modelResult.dispositions.filter((disposition) => disposition.status === "fixed");
-  const stillOpen = modelResult.dispositions.filter(
-    (disposition) => disposition.status === "still_present",
-  );
-  const generalBody = renderGeneralComment(modelResult.general!, {
-    newFindings: modelResult.findings.length,
-    stillOpen: stillOpen.length,
-    fixed: fixed.length,
-  });
-  if (generalBody.length > GITHUB_COMMENT_LIMIT) {
-    throw new Error("General review exceeds GitHub's comment size limit");
-  }
+    report("Loading review configuration and collecting the pull request diff.");
+    const config = await (options.configLoader ?? loadReviewConfig)(options.cwd);
+    const diff = await collectReviewDiff(options.cwd, options.context, options.git);
+    report(`Collected ${diff.files.length} changed file(s).`);
+    if (diff.files.length === 0 || !shouldRunReview(diff.files, config.trackedPaths)) {
+      report("No changed path matched review.tracked_paths; skipping agent review.");
+      const skippedStatus = await publishDescriptionStatus(options, "skipped", report);
+      if (skippedStatus === "updated") report("Pull request status set to skipped.");
+      if (skippedStatus === "unchanged") report("Pull request skipped status unchanged.");
+      return { skipped: true, newFindings: 0, stillOpen: 0, fixed: 0 };
+    }
 
-  for (const finding of modelResult.findings) {
-    await options.github.createInlineComment(
-      finding,
-      renderFindingComment(finding),
-      options.context.headSha,
+    report("Loading previous Janitor feedback from GitHub.");
+    const [comments, threads] = await Promise.all([
+      options.github.listGeneralComments(),
+      options.github.listReviewThreads(),
+    ]);
+    const generalComment = findJanitorGeneralComment(comments);
+    const previousFindings = findOpenJanitorFindings(threads);
+    report(`Loaded ${previousFindings.length} unresolved Janitor finding(s).`);
+
+    report("Starting the coding review agent.");
+    const modelResult = await options.agent.run({
+      cwd: options.cwd,
+      context: options.context,
+      diff,
+      previousFindings,
+    });
+    report("Coding review agent finished; validating its output.");
+    validateModelResult(modelResult, previousFindings, diff);
+    report("Agent output validated successfully.");
+
+    const fixed = modelResult.dispositions.filter((disposition) => disposition.status === "fixed");
+    const stillOpen = modelResult.dispositions.filter(
+      (disposition) => disposition.status === "still_present",
     );
-  }
-  for (const disposition of fixed) {
-    await options.github.resolveThread(disposition.threadId);
-  }
-  if (generalComment === undefined) {
-    await options.github.createGeneralComment(generalBody);
-  } else {
-    await options.github.updateGeneralComment(generalComment.id, generalBody);
-  }
+    const generalBody = renderGeneralComment(modelResult.general!, {
+      newFindings: modelResult.findings.length,
+      stillOpen: stillOpen.length,
+      fixed: fixed.length,
+    });
+    if (generalBody.length > GITHUB_COMMENT_LIMIT) {
+      throw new Error("General review exceeds GitHub's comment size limit");
+    }
 
-  return {
-    skipped: false,
-    newFindings: modelResult.findings.length,
-    stillOpen: stillOpen.length,
-    fixed: fixed.length,
-  };
+    report("Publishing validated review feedback to GitHub.");
+    for (const finding of modelResult.findings) {
+      await options.github.createInlineComment(
+        finding,
+        renderFindingComment(finding),
+        options.context.headSha,
+      );
+    }
+    for (const disposition of fixed) {
+      await options.github.resolveThread(disposition.threadId);
+    }
+    if (generalComment === undefined) {
+      await options.github.createGeneralComment(generalBody);
+    } else {
+      await options.github.updateGeneralComment(generalComment.id, generalBody);
+    }
+    report("Review feedback published to GitHub.");
+
+    const completionStatus =
+      modelResult.general!.confidence === 5 ? "complete-max-confidence" : "complete";
+    const completionPublication = await publishDescriptionStatus(options, completionStatus, report);
+    if (completionPublication === "updated") report("Pull request status set to complete.");
+    if (completionPublication === "unchanged") {
+      report("Skipped a stale pull request status update for another head.");
+    }
+
+    return {
+      skipped: false,
+      newFindings: modelResult.findings.length,
+      stillOpen: stillOpen.length,
+      fixed: fixed.length,
+    };
+  } catch (error) {
+    report(`Janitor review failed: ${errorMessage(error)}`);
+    const failedStatus = await publishDescriptionStatus(options, "failed", report);
+    if (failedStatus === "updated") report("Pull request status set to failed.");
+    if (failedStatus === "unchanged") {
+      report("Skipped a stale failed-status update for another head.");
+    }
+    throw error;
+  }
 }

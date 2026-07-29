@@ -2,6 +2,61 @@ import type { ExistingFinding, GeneralReview, NewFinding } from "#/review/types"
 
 export const GENERAL_REVIEW_MARKER = "<!-- janitor:general-review:v1 -->";
 export const FINDING_MARKER = "<!-- janitor:finding:v1 -->";
+export const REVIEW_STATUS_MARKER = "janitor:review-status:v1";
+
+export type ReviewDescriptionStatus =
+  | "running"
+  | "complete"
+  | "complete-max-confidence"
+  | "skipped"
+  | "failed";
+
+const REVIEW_STATUS_END_MARKER = `<!-- /${REVIEW_STATUS_MARKER} -->`;
+const REVIEW_STATUS_BLOCK_PATTERN = new RegExp(
+  String.raw`(?:\r?\n){0,2}<!-- ${REVIEW_STATUS_MARKER} head=([^\s>]+) -->\r?\n[^\r\n]*\r?\n<!-- \/${REVIEW_STATUS_MARKER} -->`,
+  "gu",
+);
+
+const REVIEW_STATUS_TEXT: Record<ReviewDescriptionStatus, string> = {
+  running: "👀 Janitor review in progress",
+  complete: "✅ Janitor review complete",
+  "complete-max-confidence": "👍 Janitor review complete — confidence 5/5",
+  skipped: "⏭️ Janitor review skipped — no tracked paths changed",
+  failed: "❌ Janitor review failed",
+};
+
+function currentStatusHead(body: string): string | undefined {
+  const matches = [...body.matchAll(REVIEW_STATUS_BLOCK_PATTERN)];
+  const encodedHead = matches.at(-1)?.[1];
+  if (encodedHead === undefined) return undefined;
+  try {
+    return decodeURIComponent(encodedHead);
+  } catch {
+    return encodedHead;
+  }
+}
+
+export function renderReviewDescriptionStatus(
+  headSha: string,
+  status: ReviewDescriptionStatus,
+): string {
+  return `<!-- ${REVIEW_STATUS_MARKER} head=${encodeURIComponent(headSha)} -->\n${REVIEW_STATUS_TEXT[status]}\n${REVIEW_STATUS_END_MARKER}`;
+}
+
+export function reconcileReviewDescription(
+  body: string,
+  headSha: string,
+  status: ReviewDescriptionStatus,
+): string {
+  const currentHead = currentStatusHead(body);
+  if (status !== "running" && currentHead !== undefined && currentHead !== headSha) {
+    return body;
+  }
+
+  const authorBody = body.replace(REVIEW_STATUS_BLOCK_PATTERN, "");
+  const separator = authorBody.length === 0 ? "" : "\n\n";
+  return `${authorBody}${separator}${renderReviewDescriptionStatus(headSha, status)}`;
+}
 
 export function renderFindingComment(finding: NewFinding): string {
   return `${FINDING_MARKER}\n**${finding.severity.toUpperCase()}: ${finding.title}**\n\n${finding.body}`;
