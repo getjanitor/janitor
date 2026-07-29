@@ -3,7 +3,7 @@ import { join } from "node:path";
 import { type } from "arktype";
 import { minimatch } from "minimatch";
 import { parse } from "smol-toml";
-import type { ChangedFile, ReviewDiff, ReviewType } from "#/review/types";
+import type { ChangedFile, ReviewDiff } from "#/review/types";
 
 export type DisabledFindingsPolicy = "leave_open" | "review" | "resolve";
 
@@ -71,10 +71,6 @@ export function fileMatchesReviewPaths(file: ChangedFile, paths: string[]): bool
   return [file.path, file.previousPath].some(
     (path) => path !== undefined && pathMatchesReviewPaths(path, paths),
   );
-}
-
-export function reviewTypeConfig(config: ReviewConfig, reviewType: ReviewType): ReviewTypeConfig {
-  return config[reviewType];
 }
 
 export function filterReviewDiff(diff: ReviewDiff, paths: string[]): ReviewDiff {

@@ -3,7 +3,6 @@ import {
   findingPathMatchesReviewPaths,
   loadReviewConfig,
   type DisabledFindingsPolicy,
-  type ReviewConfig,
 } from "#/review/config";
 import { collectReviewDiff, isCommentableLocation } from "#/review/git";
 import {
@@ -200,7 +199,6 @@ function emptyTypeResult(): ReviewTypeExecutionResult {
 
 interface TypeState {
   reviewType: ReviewType;
-  config: ReviewConfig[ReviewType];
   diff: ReviewDiff;
   previous: PreviousFindingPartition;
 }
@@ -238,7 +236,6 @@ export async function executeReview(options: ExecuteReviewOptions): Promise<Exec
   const states = REVIEW_TYPES.map(
     (reviewType): TypeState => ({
       reviewType,
-      config: config[reviewType],
       diff: scopedDiffs[reviewType],
       previous: partitionPreviousFindings(
         previousFindings,
