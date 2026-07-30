@@ -34,6 +34,7 @@ jobs:
         run: npx --yes {= janitor_package | json_string =} review
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          JANITOR_VERBOSE: ${{ vars.JANITOR_VERBOSE }}
           JANITOR_MODEL: ${{ secrets.JANITOR_MODEL }}
           JANITOR_PROVIDER: ${{ secrets.JANITOR_PROVIDER }}
           JANITOR_PROVIDER_KEY: ${{ secrets.JANITOR_PROVIDER_KEY }}
