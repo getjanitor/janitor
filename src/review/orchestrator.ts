@@ -6,6 +6,7 @@ import {
   reconcileReviewDescription,
   renderFindingComment,
   renderGeneralComment,
+  renderGeneralCommentStatus,
   type ReviewDescriptionStatus,
 } from "#/review/markers";
 import { requireValidModelText } from "#/review/model_result";
@@ -151,6 +152,7 @@ function errorMessage(error: unknown): string {
 
 export async function executeReview(options: ExecuteReviewOptions): Promise<ExecuteReviewResult> {
   const report = options.report ?? (() => undefined);
+  let generalCommentId: number | undefined;
 
   try {
     report(`Starting Janitor review for pull request #${options.context.number}.`);
@@ -178,6 +180,15 @@ export async function executeReview(options: ExecuteReviewOptions): Promise<Exec
     const generalComment = findJanitorGeneralComment(comments);
     const previousFindings = findOpenJanitorFindings(threads);
     report(`Loaded ${previousFindings.length} unresolved Janitor finding(s).`);
+
+    const runningGeneralBody = renderGeneralCommentStatus("running");
+    if (generalComment === undefined) {
+      generalCommentId = await options.github.createGeneralComment(runningGeneralBody);
+    } else {
+      generalCommentId = generalComment.id;
+      await options.github.updateGeneralComment(generalCommentId, runningGeneralBody);
+    }
+    report("General review comment set to running.");
 
     report("Starting the coding review agent.");
     const modelResult = await options.agent.run({
@@ -214,11 +225,7 @@ export async function executeReview(options: ExecuteReviewOptions): Promise<Exec
     for (const disposition of fixed) {
       await options.github.resolveThread(disposition.threadId);
     }
-    if (generalComment === undefined) {
-      await options.github.createGeneralComment(generalBody);
-    } else {
-      await options.github.updateGeneralComment(generalComment.id, generalBody);
-    }
+    await options.github.updateGeneralComment(generalCommentId, generalBody);
     report("Review feedback published to GitHub.");
 
     const completionStatus =
@@ -237,6 +244,17 @@ export async function executeReview(options: ExecuteReviewOptions): Promise<Exec
     };
   } catch (error) {
     report(`Janitor review failed: ${errorMessage(error)}`);
+    if (generalCommentId !== undefined) {
+      try {
+        await options.github.updateGeneralComment(
+          generalCommentId,
+          renderGeneralCommentStatus("failed"),
+        );
+        report("General review comment set to failed.");
+      } catch (commentError) {
+        report(`Unable to update the failed general review comment: ${errorMessage(commentError)}`);
+      }
+    }
     const failedStatus = await publishDescriptionStatus(options, "failed", report);
     if (failedStatus === "updated") report("Pull request status set to failed.");
     if (failedStatus === "unchanged") {

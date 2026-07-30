@@ -65,6 +65,14 @@ export function renderFindingComment(finding: NewFinding): string {
   return `${FINDING_MARKER}\n**${finding.severity.toUpperCase()}: ${finding.title}**\n\n${finding.body}`;
 }
 
+export function renderGeneralCommentStatus(status: "running" | "failed"): string {
+  const message =
+    status === "running"
+      ? "👀 Review in progress…"
+      : "❌ Review failed. See the workflow logs for details.";
+  return `${GENERAL_REVIEW_MARKER}\n## Janitor review\n\n${message}\n`;
+}
+
 export function renderGeneralComment(
   general: GeneralReview,
   counts: { newFindings: number; stillOpen: number; fixed: number },

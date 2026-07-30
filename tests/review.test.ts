@@ -112,7 +112,7 @@ function githubBoundary(
     ),
     createInlineComment: vi.fn(async () => undefined),
     resolveThread: vi.fn(async () => undefined),
-    createGeneralComment: vi.fn(async () => undefined),
+    createGeneralComment: vi.fn(async () => 10),
     updateGeneralComment: vi.fn(async () => undefined),
   } as never;
 }
@@ -488,6 +488,36 @@ describe("Janitor markers and prompt", () => {
 });
 
 describe("review reconciliation", () => {
+  it("creates the canonical progress comment before the agent starts and updates it in place", async () => {
+    const github = githubBoundary();
+    const reviewAgent: ReviewAgentBoundary = {
+      run: vi.fn(async () => {
+        expect(github.createGeneralComment).toHaveBeenCalledWith(
+          expect.stringContaining(GENERAL_REVIEW_MARKER),
+        );
+        expect(github.createGeneralComment).toHaveBeenCalledWith(
+          expect.stringContaining("Review in progress"),
+        );
+        return { findings: [], dispositions: [], general: cleanGeneral };
+      }),
+    };
+
+    await executeReview({
+      cwd: "/repo",
+      context,
+      git: reviewGit(),
+      github,
+      agent: reviewAgent,
+      configLoader: async () => ({ trackedPaths: ["src/**"] }),
+    });
+
+    expect(github.createGeneralComment).toHaveBeenCalledOnce();
+    expect(github.updateGeneralComment).toHaveBeenCalledWith(
+      10,
+      expect.stringContaining("Confidence: 4/5"),
+    );
+  });
+
   it("posts new inline findings and creates the canonical general comment", async () => {
     const github = githubBoundary();
     const result = await execute(
@@ -510,8 +540,13 @@ describe("review reconciliation", () => {
     expect(result).toEqual({ skipped: false, newFindings: 1, stillOpen: 0, fixed: 0 });
     expect(github.createInlineComment).toHaveBeenCalledOnce();
     expect(github.createInlineComment.mock.calls[0]?.[1]).toContain(FINDING_MARKER);
-    expect(github.createGeneralComment).toHaveBeenCalledOnce();
-    expect(github.updateGeneralComment).not.toHaveBeenCalled();
+    expect(github.createGeneralComment).toHaveBeenCalledWith(
+      expect.stringContaining("Review in progress"),
+    );
+    expect(github.updateGeneralComment).toHaveBeenCalledWith(
+      10,
+      expect.stringContaining("Confidence: 4/5"),
+    );
     expect(github.getPullRequestBody).toHaveBeenCalledTimes(2);
     expect(github.updatePullRequestBody).toHaveBeenCalledTimes(2);
     expect(github.updatePullRequestBody.mock.calls[0]?.[0]).toContain(
@@ -617,7 +652,17 @@ describe("review reconciliation", () => {
     );
     expect(github.createInlineComment).not.toHaveBeenCalled();
     expect(github.resolveThread).not.toHaveBeenCalled();
-    expect(github.updateGeneralComment).toHaveBeenCalledWith(9, expect.any(String));
+    expect(github.updateGeneralComment).toHaveBeenNthCalledWith(
+      1,
+      9,
+      expect.stringContaining("Review in progress"),
+    );
+    expect(github.updateGeneralComment).toHaveBeenNthCalledWith(
+      2,
+      9,
+      expect.stringContaining("Confidence: 4/5"),
+    );
+    expect(github.createGeneralComment).not.toHaveBeenCalled();
   });
 
   it("resolves an explicitly fixed old finding and updates the general comment", async () => {
@@ -633,10 +678,35 @@ describe("review reconciliation", () => {
       github,
     );
     expect(github.resolveThread).toHaveBeenCalledWith("thread-1");
-    expect(github.updateGeneralComment).toHaveBeenCalledOnce();
+    expect(github.updateGeneralComment).toHaveBeenCalledTimes(2);
   });
 
-  it("performs no mutations when model output is incomplete or has an invalid location", async () => {
+  it("updates the early general comment when the review fails", async () => {
+    const github = githubBoundary();
+    const failure = new Error("agent unavailable");
+
+    await expect(
+      executeReview({
+        cwd: "/repo",
+        context,
+        git: reviewGit(),
+        github,
+        agent: { run: vi.fn(async () => Promise.reject(failure)) },
+        configLoader: async () => ({ trackedPaths: ["src/**"] }),
+      }),
+    ).rejects.toThrow("agent unavailable");
+
+    expect(github.createGeneralComment).toHaveBeenCalledWith(
+      expect.stringContaining("Review in progress"),
+    );
+    expect(github.updateGeneralComment).toHaveBeenCalledWith(
+      10,
+      expect.stringContaining("Review failed"),
+    );
+    expect(github.updatePullRequestBody.mock.calls[1]?.[0]).toContain("❌ Janitor review failed");
+  });
+
+  it("does not publish inline or thread mutations for invalid model output", async () => {
     const github = githubBoundary({ previous: true });
     await expect(
       execute(
@@ -659,7 +729,13 @@ describe("review reconciliation", () => {
     ).rejects.toThrow(/omitted dispositions|not a changed line/u);
     expect(github.createInlineComment).not.toHaveBeenCalled();
     expect(github.resolveThread).not.toHaveBeenCalled();
-    expect(github.createGeneralComment).not.toHaveBeenCalled();
+    expect(github.createGeneralComment).toHaveBeenCalledWith(
+      expect.stringContaining("Review in progress"),
+    );
+    expect(github.updateGeneralComment).toHaveBeenCalledWith(
+      10,
+      expect.stringContaining("Review failed"),
+    );
     expect(github.updatePullRequestBody.mock.calls[1]?.[0]).toContain("❌ Janitor review failed");
   });
 
@@ -689,7 +765,16 @@ describe("review reconciliation", () => {
     expect(github.createInlineComment).not.toHaveBeenCalled();
     expect(github.resolveThread).not.toHaveBeenCalled();
     expect(github.createGeneralComment).not.toHaveBeenCalled();
-    expect(github.updateGeneralComment).not.toHaveBeenCalled();
+    expect(github.updateGeneralComment).toHaveBeenNthCalledWith(
+      1,
+      9,
+      expect.stringContaining("Review in progress"),
+    );
+    expect(github.updateGeneralComment).toHaveBeenNthCalledWith(
+      2,
+      9,
+      expect.stringContaining("Review failed"),
+    );
     expect(github.updatePullRequestBody.mock.calls[1]?.[0]).toContain("❌ Janitor review failed");
   });
 

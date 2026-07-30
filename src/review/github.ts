@@ -185,13 +185,14 @@ export class GitHubReviewClient implements GitHubReviewBoundary {
     await this.#graphql(resolveThreadMutation, { threadId });
   }
 
-  async createGeneralComment(body: string): Promise<void> {
-    await this.#octokit.rest.issues.createComment({
+  async createGeneralComment(body: string): Promise<number> {
+    const response = await this.#octokit.rest.issues.createComment({
       owner: this.#context.owner,
       repo: this.#context.repo,
       issue_number: this.#context.number,
       body,
     });
+    return response.data.id;
   }
 
   async updateGeneralComment(commentId: number, body: string): Promise<void> {
