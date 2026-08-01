@@ -13,6 +13,7 @@ import type {
   ReviewAgentBoundary,
   ReviewAgentInput,
   ReviewEnvironment,
+  ReviewUsageReporter,
 } from "#/review/types";
 
 const REVIEW_SYSTEM_PROMPT = `You are Janitor, a careful pull-request code reviewer.
@@ -117,6 +118,59 @@ export function formatAgentActivity(event: AgentSessionEvent): string | undefine
   }
 }
 
+interface UsageShape {
+  input: number;
+  output: number;
+  cacheRead: number;
+  cacheWrite: number;
+  cost: { total: number };
+}
+
+interface PricingShape {
+  cost: {
+    input: number;
+    output: number;
+    cacheRead: number;
+    cacheWrite: number;
+    tiers?: Array<{ input: number; output: number; cacheRead: number; cacheWrite: number }>;
+  };
+}
+
+export function hasAvailableModelPricing(model: PricingShape): boolean {
+  const rates = [model.cost, ...(model.cost.tiers ?? [])];
+  return rates.some((rate) =>
+    [rate.input, rate.output, rate.cacheRead, rate.cacheWrite].some((value) => value > 0),
+  );
+}
+
+function reportUsage(
+  usage: UsageShape,
+  pricingAvailable: boolean,
+  reporter: ReviewUsageReporter,
+): void {
+  reporter({
+    inputTokens: usage.input + usage.cacheRead + usage.cacheWrite,
+    outputTokens: usage.output,
+    estimatedCostUsd: pricingAvailable ? usage.cost.total : undefined,
+  });
+}
+
+export function reportAgentEventUsage(
+  event: AgentSessionEvent,
+  pricingAvailable: boolean,
+  reporter: ReviewUsageReporter,
+): void {
+  if (
+    event.type === "message_end" &&
+    (event.message.role === "assistant" || event.message.role === "toolResult") &&
+    event.message.usage !== undefined
+  ) {
+    reportUsage(event.message.usage, pricingAvailable, reporter);
+  } else if (event.type === "compaction_end" && event.result?.usage !== undefined) {
+    reportUsage(event.result.usage, pricingAvailable, reporter);
+  }
+}
+
 export class CodingReviewAgent implements ReviewAgentBoundary {
   readonly #environment: ReviewEnvironment;
   readonly #report: (message: string) => void;
@@ -126,7 +180,10 @@ export class CodingReviewAgent implements ReviewAgentBoundary {
     this.#report = report;
   }
 
-  async run(input: ReviewAgentInput): Promise<ModelReviewResult> {
+  async run(
+    input: ReviewAgentInput,
+    usageReporter?: ReviewUsageReporter,
+  ): Promise<ModelReviewResult> {
     const output: ModelReviewResult = {
       findings: [],
       dispositions: [],
@@ -141,6 +198,7 @@ export class CodingReviewAgent implements ReviewAgentBoundary {
         `Model ${this.#environment.provider}/${this.#environment.model} is unavailable`,
       );
     }
+    const pricingAvailable = usageReporter === undefined ? false : hasAvailableModelPricing(model);
 
     const settingsManager = SettingsManager.inMemory({
       compaction: { enabled: true },
@@ -174,6 +232,9 @@ export class CodingReviewAgent implements ReviewAgentBoundary {
     const unsubscribe = session.subscribe((event) => {
       const activity = formatAgentActivity(event);
       if (activity !== undefined) this.#report(activity);
+      if (usageReporter !== undefined) {
+        reportAgentEventUsage(event, pricingAvailable, usageReporter);
+      }
     });
     try {
       await session.prompt(buildReviewPrompt(input));

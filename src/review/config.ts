@@ -7,6 +7,7 @@ import type { ChangedFile } from "#/review/types";
 
 export interface ReviewConfig {
   trackedPaths: string[];
+  trackSpend: boolean;
 }
 
 const nonEmptyString = type("string > 0");
@@ -14,6 +15,7 @@ const janitorConfigSchema = type({
   version: nonEmptyString,
   review: {
     tracked_paths: nonEmptyString.array().atLeastLength(1),
+    "track_spend?": "boolean",
   },
 });
 
@@ -28,7 +30,10 @@ export async function loadReviewConfig(cwd: string): Promise<ReviewConfig> {
 
   try {
     const config = janitorConfigSchema.assert(document);
-    return { trackedPaths: config.review.tracked_paths };
+    return {
+      trackedPaths: config.review.tracked_paths,
+      trackSpend: config.review.track_spend ?? false,
+    };
   } catch (error) {
     const reason = error instanceof Error ? error.message : String(error);
     throw new Error(`Invalid ${path}: ${reason}`, { cause: error });

@@ -71,6 +71,9 @@ describe("init template rendering", () => {
 version = "next"
 
 [review]
+# Append per-run model token usage and estimated cost to the main review comment.
+track_spend = false
+
 # Run a review when at least one changed path matches one of these glob patterns.
 tracked_paths = [
   "src/**",
@@ -130,6 +133,7 @@ describe("init filesystem behavior", () => {
     });
     expect(reports).toEqual(result.targets);
     expect(await readTarget(cwd, "janitor.toml")).toContain('version = "beta"');
+    expect(await readTarget(cwd, "janitor.toml")).toContain("track_spend = false");
     expect(await readTarget(cwd, "janitor.toml")).toContain('  "**"');
     expect(await readTarget(cwd, ".github/workflows/janitor.yml")).toContain(
       'npx --yes "@matfire/janitor@beta" review',

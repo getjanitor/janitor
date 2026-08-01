@@ -3,7 +3,12 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { review } from "#/commands/review";
-import { buildReviewPrompt, formatAgentActivity } from "#/review/agent";
+import {
+  buildReviewPrompt,
+  formatAgentActivity,
+  hasAvailableModelPricing,
+  reportAgentEventUsage,
+} from "#/review/agent";
 import { loadReviewConfig, shouldRunReview } from "#/review/config";
 import { collectReviewDiff, parseCommentableLines, parseNameStatus } from "#/review/git";
 import {
@@ -14,10 +19,21 @@ import {
   findOpenJanitorFindings,
   reconcileReviewDescription,
   renderGeneralComment,
+  renderGeneralCommentStatus,
   renderReviewDescriptionStatus,
 } from "#/review/markers";
 import { requireValidModelText } from "#/review/model_result";
 import { executeReview } from "#/review/orchestrator";
+import {
+  MAX_SPEND_ENTRIES,
+  appendSpendEntry,
+  completedSpendEntry,
+  createReviewUsageAccumulator,
+  formatEstimatedCost,
+  parseSpendHistory,
+  renderSpendHistory,
+  trimSpendHistoryToFit,
+} from "#/review/spend";
 import { readPullRequestContext, readReviewEnvironment } from "#/review/runtime";
 import type {
   GitCommandBoundary,
@@ -68,6 +84,7 @@ function githubBoundary(
   options: {
     previous?: boolean;
     general?: boolean;
+    generalBody?: string;
     body?: string;
   } = {},
 ): GitHubReviewBoundary & Record<string, ReturnType<typeof vi.fn>> {
@@ -83,7 +100,7 @@ function githubBoundary(
         ? [
             {
               id: 9,
-              body: GENERAL_REVIEW_MARKER,
+              body: options.generalBody ?? GENERAL_REVIEW_MARKER,
               author: "github-actions[bot]",
             },
           ]
@@ -135,7 +152,7 @@ async function execute(modelResult: ModelReviewResult, github = githubBoundary()
     git: reviewGit(),
     github,
     agent: agent(modelResult),
-    configLoader: async () => ({ trackedPaths: ["src/**"] }),
+    configLoader: async () => ({ trackedPaths: ["src/**"], trackSpend: false }),
   });
 }
 
@@ -195,6 +212,7 @@ describe("review runtime and configuration", () => {
     );
     await expect(loadReviewConfig(directory)).resolves.toEqual({
       trackedPaths: ["src/**", ".github/**"],
+      trackSpend: false,
     });
     expect(
       shouldRunReview(
@@ -298,6 +316,27 @@ describe("review runtime and configuration", () => {
     await expect(loadReviewConfig(directory)).rejects.toThrow(
       /tracked_paths\[0\] must be non-empty/u,
     );
+
+    await writeFile(
+      configPath,
+      "version = 'latest'\n[review]\ntracked_paths = ['**']\ntrack_spend = 'yes'\n",
+    );
+    await expect(loadReviewConfig(directory)).rejects.toThrow(/track_spend must be boolean/u);
+  });
+
+  it("loads explicit spend tracking settings", async () => {
+    const directory = await temporaryDirectory();
+    const configPath = join(directory, "janitor.toml");
+    await writeFile(
+      configPath,
+      'version = "latest"\n[review]\ntracked_paths = ["**"]\ntrack_spend = true\n',
+    );
+    await expect(loadReviewConfig(directory)).resolves.toMatchObject({ trackSpend: true });
+    await writeFile(
+      configPath,
+      'version = "latest"\n[review]\ntracked_paths = ["**"]\ntrack_spend = false\n',
+    );
+    await expect(loadReviewConfig(directory)).resolves.toMatchObject({ trackSpend: false });
   });
 });
 
@@ -407,6 +446,12 @@ describe("Janitor markers and prompt", () => {
     const markers = [
       GENERAL_REVIEW_MARKER,
       FINDING_MARKER,
+      renderSpendHistory([
+        completedSpendEntry("head-sha", "succeeded", {
+          inputTokens: 1,
+          outputTokens: 2,
+        }),
+      ]),
       renderReviewDescriptionStatus("head-sha", "running"),
     ];
 
@@ -487,7 +532,239 @@ describe("Janitor markers and prompt", () => {
   });
 });
 
+describe("review spend accounting", () => {
+  const pricedModel = {
+    cost: { input: 1, output: 2, cacheRead: 0.1, cacheWrite: 1.25 },
+  };
+
+  function eventUsage(input: number, output: number, cacheRead = 0, cacheWrite = 0) {
+    return {
+      input,
+      output,
+      cacheRead,
+      cacheWrite,
+      totalTokens: input + output + cacheRead + cacheWrite,
+      cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0.0123 },
+    };
+  }
+
+  it("aggregates assistant, tool-model, retry, and compaction usage exactly once", () => {
+    const accumulator = createReviewUsageAccumulator();
+    const report = (event: Parameters<typeof reportAgentEventUsage>[0]) =>
+      reportAgentEventUsage(event, true, accumulator.report);
+    report({
+      type: "message_end",
+      message: { role: "assistant", usage: eventUsage(10, 4, 3, 2) },
+    } as never);
+    report({
+      type: "message_end",
+      message: { role: "assistant", usage: eventUsage(5, 2, 1, 1), stopReason: "error" },
+    } as never);
+    report({
+      type: "message_end",
+      message: { role: "toolResult", usage: eventUsage(7, 3, 2, 1) },
+    } as never);
+    report({
+      type: "compaction_end",
+      result: { usage: eventUsage(8, 5, 4, 2) },
+    } as never);
+    report({ type: "agent_end", messages: [], willRetry: false } as never);
+
+    expect(accumulator.snapshot()).toEqual({
+      inputTokens: 46,
+      outputTokens: 14,
+      estimatedCostUsd: 0.0492,
+    });
+  });
+
+  it("only publishes cost when the model catalog has a positive price", () => {
+    expect(hasAvailableModelPricing(pricedModel)).toBe(true);
+    expect(
+      hasAvailableModelPricing({
+        cost: {
+          input: 0,
+          output: 0,
+          cacheRead: 0,
+          cacheWrite: 0,
+          tiers: [{ input: 0, output: 3, cacheRead: 0, cacheWrite: 0 }],
+        },
+      }),
+    ).toBe(true);
+    expect(
+      hasAvailableModelPricing({
+        cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+      }),
+    ).toBe(false);
+    expect(formatEstimatedCost(0.012_345)).toBe("$0.0123");
+    expect(formatEstimatedCost(undefined)).toBe("—");
+  });
+
+  it("round-trips controlled history, ignores malformed metadata, and keeps the newest 50", () => {
+    let history = [];
+    for (let index = 0; index < MAX_SPEND_ENTRIES + 2; index++) {
+      history = appendSpendEntry(
+        history,
+        completedSpendEntry(`sha-${index}`, index % 2 === 0 ? "succeeded" : "failed", {
+          inputTokens: index,
+          outputTokens: index + 1,
+        }),
+      );
+    }
+    const rendered = renderSpendHistory(history);
+    const parsed = parseSpendHistory(rendered);
+    expect(parsed).toHaveLength(50);
+    expect(parsed[0]?.headSha).toBe("sha-2");
+    expect(parsed.at(-1)?.headSha).toBe("sha-51");
+    expect(rendered.indexOf("sha-2")).toBeLessThan(rendered.indexOf("sha-51"));
+    expect(
+      parseSpendHistory("<!-- janitor:spend:v1 -->\nnot json\n<!-- /janitor:spend:v1 -->"),
+    ).toEqual([]);
+  });
+
+  it("drops additional oldest entries until a complete comment fits", () => {
+    const history = Array.from({ length: 50 }, (_, index) =>
+      completedSpendEntry(`commit-${index}`, "succeeded", {
+        inputTokens: index,
+        outputTokens: index,
+      }),
+    );
+    const fullLength = `review${renderSpendHistory(history)}`.length;
+    const result = trimSpendHistoryToFit(
+      history,
+      (retained) => `review${renderSpendHistory(retained)}`,
+      fullLength - 500,
+    );
+    expect(result.body.length).toBeLessThanOrEqual(fullLength - 500);
+    expect(result.history.length).toBeLessThan(50);
+    expect(result.history.at(-1)?.headSha).toBe("commit-49");
+  });
+});
+
 describe("review reconciliation", () => {
+  it("does not collect or render spend when tracking is disabled", async () => {
+    const github = githubBoundary();
+    const reviewAgent: ReviewAgentBoundary = {
+      run: vi.fn(async (_input, reporter) => {
+        expect(reporter).toBeUndefined();
+        return { findings: [], dispositions: [], general: cleanGeneral };
+      }),
+    };
+    await executeReview({
+      cwd: "/repo",
+      context,
+      git: reviewGit(),
+      github,
+      agent: reviewAgent,
+      configLoader: async () => ({ trackedPaths: ["src/**"], trackSpend: false }),
+    });
+    expect(github.updateGeneralComment.mock.calls.at(-1)?.[1]).not.toContain("### Spend");
+  });
+
+  it("removes an old spend ledger when tracking is disabled", async () => {
+    const oldBody = renderGeneralCommentStatus("running", [
+      completedSpendEntry("old-head", "succeeded", { inputTokens: 10, outputTokens: 4 }),
+    ]);
+    const github = githubBoundary({ general: true, generalBody: oldBody });
+    await executeReview({
+      cwd: "/repo",
+      context,
+      git: reviewGit(),
+      github,
+      agent: agent({ findings: [], dispositions: [], general: cleanGeneral }),
+      configLoader: async () => ({ trackedPaths: ["src/**"], trackSpend: false }),
+    });
+    expect(github.updateGeneralComment).toHaveBeenNthCalledWith(
+      1,
+      9,
+      expect.not.stringContaining("### Spend"),
+    );
+    expect(github.updateGeneralComment.mock.calls.at(-1)?.[1]).not.toContain("### Spend");
+  });
+
+  it("preserves history while running and appends distinct successful reruns", async () => {
+    const prior = completedSpendEntry("head-sha", "succeeded", {
+      inputTokens: 10,
+      outputTokens: 4,
+      estimatedCostUsd: 0.01,
+    });
+    const github = githubBoundary({
+      general: true,
+      generalBody: renderGeneralCommentStatus("running", [prior]),
+    });
+    const reviewAgent: ReviewAgentBoundary = {
+      run: vi.fn(async (_input, reporter) => {
+        expect(github.updateGeneralComment.mock.calls[0]?.[1]).toContain("### Spend");
+        reporter?.({ inputTokens: 20, outputTokens: 8, estimatedCostUsd: 0.02 });
+        reporter?.({ inputTokens: 5, outputTokens: 2, estimatedCostUsd: 0.005 });
+        return { findings: [], dispositions: [], general: cleanGeneral };
+      }),
+    };
+    await executeReview({
+      cwd: "/repo",
+      context,
+      git: reviewGit(),
+      github,
+      agent: reviewAgent,
+      configLoader: async () => ({ trackedPaths: ["src/**"], trackSpend: true }),
+    });
+    const history = parseSpendHistory(String(github.updateGeneralComment.mock.calls.at(-1)?.[1]));
+    expect(history).toHaveLength(2);
+    expect(history.map((entry) => entry.headSha)).toEqual(["head-sha", "head-sha"]);
+    expect(history[1]).toMatchObject({
+      status: "succeeded",
+      inputTokens: 25,
+      outputTokens: 10,
+      estimatedCostUsd: 0.025,
+    });
+  });
+
+  it("records partial usage for a failed agent run", async () => {
+    const github = githubBoundary();
+    const failure = new Error("agent failed after a response");
+    await expect(
+      executeReview({
+        cwd: "/repo",
+        context,
+        git: reviewGit(),
+        github,
+        agent: {
+          run: vi.fn(async (_input, reporter) => {
+            reporter?.({ inputTokens: 12, outputTokens: 3, estimatedCostUsd: 0.004 });
+            throw failure;
+          }),
+        },
+        configLoader: async () => ({ trackedPaths: ["src/**"], trackSpend: true }),
+      }),
+    ).rejects.toBe(failure);
+    const failedBody = String(github.updateGeneralComment.mock.calls.at(-1)?.[1]);
+    expect(parseSpendHistory(failedBody)).toEqual([
+      expect.objectContaining({
+        status: "failed",
+        inputTokens: 12,
+        outputTokens: 3,
+        estimatedCostUsd: 0.004,
+      }),
+    ]);
+  });
+
+  it("records zero tokens and unavailable cost when a failed attempt reports no usage", async () => {
+    const github = githubBoundary();
+    await expect(
+      executeReview({
+        cwd: "/repo",
+        context,
+        git: reviewGit(),
+        github,
+        agent: { run: vi.fn(async () => Promise.reject(new Error("unavailable"))) },
+        configLoader: async () => ({ trackedPaths: ["src/**"], trackSpend: true }),
+      }),
+    ).rejects.toThrow("unavailable");
+    const entry = parseSpendHistory(String(github.updateGeneralComment.mock.calls.at(-1)?.[1]))[0];
+    expect(entry).toMatchObject({ status: "failed", inputTokens: 0, outputTokens: 0 });
+    expect(entry?.estimatedCostUsd).toBeUndefined();
+    expect(github.updateGeneralComment.mock.calls.at(-1)?.[1]).toContain("| — |");
+  });
+
   it("creates the canonical progress comment before the agent starts and updates it in place", async () => {
     const github = githubBoundary();
     const reviewAgent: ReviewAgentBoundary = {
@@ -508,7 +785,7 @@ describe("review reconciliation", () => {
       git: reviewGit(),
       github,
       agent: reviewAgent,
-      configLoader: async () => ({ trackedPaths: ["src/**"] }),
+      configLoader: async () => ({ trackedPaths: ["src/**"], trackSpend: false }),
     });
 
     expect(github.createGeneralComment).toHaveBeenCalledOnce();
@@ -567,7 +844,7 @@ describe("review reconciliation", () => {
       git: reviewGit(),
       github,
       agent: reviewAgent,
-      configLoader: async () => ({ trackedPaths: ["src/**"] }),
+      configLoader: async () => ({ trackedPaths: ["src/**"], trackSpend: false }),
       report: (message) => messages.push(message),
     });
 
@@ -625,7 +902,7 @@ describe("review reconciliation", () => {
         dispositions: [],
         general: cleanGeneral,
       }),
-      configLoader: async () => ({ trackedPaths: ["src/**"] }),
+      configLoader: async () => ({ trackedPaths: ["src/**"], trackSpend: false }),
       report: (message) => messages.push(message),
     });
 
@@ -692,7 +969,7 @@ describe("review reconciliation", () => {
         git: reviewGit(),
         github,
         agent: { run: vi.fn(async () => Promise.reject(failure)) },
-        configLoader: async () => ({ trackedPaths: ["src/**"] }),
+        configLoader: async () => ({ trackedPaths: ["src/**"], trackSpend: false }),
       }),
     ).rejects.toThrow("agent unavailable");
 
@@ -787,7 +1064,7 @@ describe("review reconciliation", () => {
       git: reviewGit("docs/a.md"),
       github,
       agent: reviewAgent,
-      configLoader: async () => ({ trackedPaths: ["src/**"] }),
+      configLoader: async () => ({ trackedPaths: ["src/**"], trackSpend: false }),
     });
     expect(result.skipped).toBe(true);
     expect(github.listGeneralComments).not.toHaveBeenCalled();
@@ -812,7 +1089,7 @@ describe("review reconciliation", () => {
       git: reviewGit("docs/a.md"),
       github,
       agent: reviewAgent,
-      configLoader: async () => ({ trackedPaths: ["src/**"] }),
+      configLoader: async () => ({ trackedPaths: ["src/**"], trackSpend: true }),
       report: (message) => messages.push(message),
     });
 
@@ -830,7 +1107,7 @@ describe("review reconciliation", () => {
       git: reviewGit(),
       github: githubBoundary(),
       agent: agent({ findings: [], dispositions: [], general: cleanGeneral }),
-      configLoader: async () => ({ trackedPaths: ["src/**"] }),
+      configLoader: async () => ({ trackedPaths: ["src/**"], trackSpend: false }),
       report: (message) => messages.push(message),
     });
 
@@ -867,7 +1144,7 @@ describe("review reconciliation", () => {
         git: reviewGit(),
         github,
         agent: failingAgent,
-        configLoader: async () => ({ trackedPaths: ["src/**"] }),
+        configLoader: async () => ({ trackedPaths: ["src/**"], trackSpend: false }),
         report: (message) => messages.push(message),
       }),
     ).rejects.toBe(original);

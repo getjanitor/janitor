@@ -1,4 +1,6 @@
-import type { ExistingFinding, GeneralReview, NewFinding } from "#/review/types";
+import { renderSpendHistory } from "#/review/spend";
+export { SPEND_METADATA_MARKER } from "#/review/spend";
+import type { ExistingFinding, GeneralReview, NewFinding, ReviewSpendEntry } from "#/review/types";
 
 const JANITOR_MARKER_NAMESPACE = "janitor:";
 
@@ -65,17 +67,21 @@ export function renderFindingComment(finding: NewFinding): string {
   return `${FINDING_MARKER}\n**${finding.severity.toUpperCase()}: ${finding.title}**\n\n${finding.body}`;
 }
 
-export function renderGeneralCommentStatus(status: "running" | "failed"): string {
+export function renderGeneralCommentStatus(
+  status: "running" | "failed",
+  spendHistory?: readonly ReviewSpendEntry[],
+): string {
   const message =
     status === "running"
       ? "👀 Review in progress…"
       : "❌ Review failed. See the workflow logs for details.";
-  return `${GENERAL_REVIEW_MARKER}\n## Janitor review\n\n${message}\n`;
+  return `${GENERAL_REVIEW_MARKER}\n## Janitor review\n\n${message}\n${renderSpendHistory(spendHistory ?? [])}`;
 }
 
 export function renderGeneralComment(
   general: GeneralReview,
   counts: { newFindings: number; stillOpen: number; fixed: number },
+  spendHistory?: readonly ReviewSpendEntry[],
 ): string {
   return `${GENERAL_REVIEW_MARKER}
 ## Janitor review
@@ -97,6 +103,7 @@ ${general.mermaid.trim()}
 ### Confidence: ${general.confidence}/5
 
 ${general.confidenceReason}
+${renderSpendHistory(spendHistory ?? [])}
 `;
 }
 

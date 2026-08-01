@@ -86,8 +86,22 @@ export interface ReviewAgentInput {
   previousFindings: ExistingFinding[];
 }
 
+export interface ReviewUsageDelta {
+  inputTokens: number;
+  outputTokens: number;
+  estimatedCostUsd?: number;
+}
+
+export interface ReviewSpendEntry extends ReviewUsageDelta {
+  completedAt: string;
+  headSha: string;
+  status: "succeeded" | "failed";
+}
+
+export type ReviewUsageReporter = (usage: ReviewUsageDelta) => void;
+
 export interface ReviewAgentBoundary {
-  run(input: ReviewAgentInput): Promise<ModelReviewResult>;
+  run(input: ReviewAgentInput, reportUsage?: ReviewUsageReporter): Promise<ModelReviewResult>;
 }
 
 export interface GitCommandBoundary {

@@ -10,11 +10,19 @@ import {
   type ReviewDescriptionStatus,
 } from "#/review/markers";
 import { requireValidModelText } from "#/review/model_result";
+import {
+  appendSpendEntry,
+  completedSpendEntry,
+  createReviewUsageAccumulator,
+  parseSpendHistory,
+  trimSpendHistoryToFit,
+} from "#/review/spend";
 import type {
   GitCommandBoundary,
   GitHubReviewBoundary,
   PullRequestContext,
   ReviewAgentBoundary,
+  ReviewSpendEntry,
 } from "#/review/types";
 
 const GITHUB_COMMENT_LIMIT = 65_536;
@@ -153,6 +161,10 @@ function errorMessage(error: unknown): string {
 export async function executeReview(options: ExecuteReviewOptions): Promise<ExecuteReviewResult> {
   const report = options.report ?? (() => undefined);
   let generalCommentId: number | undefined;
+  let trackSpend = false;
+  let spendHistory: ReviewSpendEntry[] = [];
+  let agentInvoked = false;
+  const usage = createReviewUsageAccumulator();
 
   try {
     report(`Starting Janitor review for pull request #${options.context.number}.`);
@@ -162,6 +174,7 @@ export async function executeReview(options: ExecuteReviewOptions): Promise<Exec
 
     report("Loading review configuration and collecting the pull request diff.");
     const config = await (options.configLoader ?? loadReviewConfig)(options.cwd);
+    trackSpend = config.trackSpend;
     const diff = await collectReviewDiff(options.cwd, options.context, options.git);
     report(`Collected ${diff.files.length} changed file(s).`);
     if (diff.files.length === 0 || !shouldRunReview(diff.files, config.trackedPaths)) {
@@ -178,10 +191,16 @@ export async function executeReview(options: ExecuteReviewOptions): Promise<Exec
       options.github.listReviewThreads(),
     ]);
     const generalComment = findJanitorGeneralComment(comments);
+    if (trackSpend && generalComment !== undefined) {
+      spendHistory = parseSpendHistory(generalComment.body);
+    }
     const previousFindings = findOpenJanitorFindings(threads);
     report(`Loaded ${previousFindings.length} unresolved Janitor finding(s).`);
 
-    const runningGeneralBody = renderGeneralCommentStatus("running");
+    const runningGeneralBody = renderGeneralCommentStatus(
+      "running",
+      trackSpend ? spendHistory : undefined,
+    );
     if (generalComment === undefined) {
       generalCommentId = await options.github.createGeneralComment(runningGeneralBody);
     } else {
@@ -191,12 +210,16 @@ export async function executeReview(options: ExecuteReviewOptions): Promise<Exec
     report("General review comment set to running.");
 
     report("Starting the coding review agent.");
-    const modelResult = await options.agent.run({
-      cwd: options.cwd,
-      context: options.context,
-      diff,
-      previousFindings,
-    });
+    agentInvoked = true;
+    const modelResult = await options.agent.run(
+      {
+        cwd: options.cwd,
+        context: options.context,
+        diff,
+        previousFindings,
+      },
+      trackSpend ? usage.report : undefined,
+    );
     report("Coding review agent finished; validating its output.");
     validateModelResult(modelResult, previousFindings, diff);
     report("Agent output validated successfully.");
@@ -205,11 +228,26 @@ export async function executeReview(options: ExecuteReviewOptions): Promise<Exec
     const stillOpen = modelResult.dispositions.filter(
       (disposition) => disposition.status === "still_present",
     );
-    const generalBody = renderGeneralComment(modelResult.general!, {
-      newFindings: modelResult.findings.length,
-      stillOpen: stillOpen.length,
-      fixed: fixed.length,
-    });
+    const successfulSpendHistory = trackSpend
+      ? appendSpendEntry(
+          spendHistory,
+          completedSpendEntry(options.context.headSha, "succeeded", usage.snapshot()),
+        )
+      : [];
+    const { body: generalBody } = trimSpendHistoryToFit(
+      successfulSpendHistory,
+      (retained) =>
+        renderGeneralComment(
+          modelResult.general!,
+          {
+            newFindings: modelResult.findings.length,
+            stillOpen: stillOpen.length,
+            fixed: fixed.length,
+          },
+          trackSpend ? retained : undefined,
+        ),
+      GITHUB_COMMENT_LIMIT,
+    );
     if (generalBody.length > GITHUB_COMMENT_LIMIT) {
       throw new Error("General review exceeds GitHub's comment size limit");
     }
@@ -226,6 +264,7 @@ export async function executeReview(options: ExecuteReviewOptions): Promise<Exec
       await options.github.resolveThread(disposition.threadId);
     }
     await options.github.updateGeneralComment(generalCommentId, generalBody);
+    if (trackSpend) spendHistory = successfulSpendHistory;
     report("Review feedback published to GitHub.");
 
     const completionStatus =
@@ -246,10 +285,18 @@ export async function executeReview(options: ExecuteReviewOptions): Promise<Exec
     report(`Janitor review failed: ${errorMessage(error)}`);
     if (generalCommentId !== undefined) {
       try {
-        await options.github.updateGeneralComment(
-          generalCommentId,
-          renderGeneralCommentStatus("failed"),
+        if (trackSpend && agentInvoked) {
+          spendHistory = appendSpendEntry(
+            spendHistory,
+            completedSpendEntry(options.context.headSha, "failed", usage.snapshot()),
+          );
+        }
+        const { body: failedBody } = trimSpendHistoryToFit(
+          trackSpend ? spendHistory : [],
+          (retained) => renderGeneralCommentStatus("failed", trackSpend ? retained : undefined),
+          GITHUB_COMMENT_LIMIT,
         );
+        await options.github.updateGeneralComment(generalCommentId, failedBody);
         report("General review comment set to failed.");
       } catch (commentError) {
         report(`Unable to update the failed general review comment: ${errorMessage(commentError)}`);

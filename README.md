@@ -67,6 +67,7 @@ The default configuration reviews changes to every tracked path:
 version = "latest"
 
 [review]
+track_spend = false
 tracked_paths = ["**"]
 ```
 
@@ -99,6 +100,16 @@ janitor review
 `review` is PR-only. It reads the standard GitHub Actions pull-request event, verifies that the checkout is at the PR head, and compares the PR merge base with that head. Running it outside a pull-request Actions job, including as a local staged-change review, is not currently supported.
 
 Before invoking the model, Janitor loads `janitor.toml`. The review is skipped when none of the changed paths (including the old path of a rename) match `review.tracked_paths`. A match enables review of the complete PR diff.
+
+Per-run spend tracking is disabled by default. Enable it explicitly to append a persistent ledger to Janitor's main PR Conversation comment:
+
+```toml
+[review]
+track_spend = true
+tracked_paths = ["**"]
+```
+
+The ledger includes successful and failed agent runs, while path-filtered skips are omitted. Input totals include uncached input plus cache-read and cache-write prompt tokens; output totals include reasoning tokens when the provider reports them. Costs are estimates from the agent library's model catalog, and models without available pricing display `—`. Janitor retains the newest 50 runs, dropping additional oldest entries when necessary to stay within GitHub's comment limit.
 
 Janitor appends a marked status block to the pull request description while preserving its author-written content. The status shows when a review is running, completed, skipped, or failed. A completed 5/5-confidence review uses a thumbs-up indicator; other successful reviews use a checkmark.
 

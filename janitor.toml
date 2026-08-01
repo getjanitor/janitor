@@ -2,5 +2,8 @@
 version = "latest"
 
 [review]
+# Append per-run model token usage and estimated cost to the main review comment.
+track_spend = true
+
 # Run a review when at least one changed path matches one of these glob patterns.
 tracked_paths = ["**"]
