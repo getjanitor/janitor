@@ -1,10 +1,11 @@
 import type { ReviewSpendEntry, ReviewUsageDelta, ReviewUsageReporter } from "#/review/types";
 
 export const MAX_SPEND_ENTRIES = 50;
-export const SPEND_METADATA_MARKER = "<!-- janitor:spend:v1 -->";
+export const SPEND_METADATA_MARKER = "<!-- janitor:spend:v1";
 
-const SPEND_METADATA_END_MARKER = "<!-- /janitor:spend:v1 -->";
-const SPEND_METADATA_PATTERN =
+const SPEND_METADATA_END_MARKER = "-->";
+const SPEND_METADATA_PATTERN = /<!-- janitor:spend:v1\r?\n([^]*?)\r?\n-->/u;
+const LEGACY_SPEND_METADATA_PATTERN =
   /<!-- janitor:spend:v1 -->\r?\n([^]*?)\r?\n<!-- \/janitor:spend:v1 -->/u;
 
 function isFiniteNonNegative(value: unknown): value is number {
@@ -31,7 +32,8 @@ function isSpendEntry(value: unknown): value is ReviewSpendEntry {
 }
 
 export function parseSpendHistory(body: string): ReviewSpendEntry[] {
-  const metadata = SPEND_METADATA_PATTERN.exec(body)?.[1];
+  const metadata =
+    SPEND_METADATA_PATTERN.exec(body)?.[1] ?? LEGACY_SPEND_METADATA_PATTERN.exec(body)?.[1];
   if (metadata === undefined) return [];
   try {
     const parsed = JSON.parse(metadata) as unknown;

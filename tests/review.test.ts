@@ -612,6 +612,8 @@ describe("review spend accounting", () => {
     }
     const rendered = renderSpendHistory(history);
     const parsed = parseSpendHistory(rendered);
+    expect(rendered).toContain('<!-- janitor:spend:v1\n{"entries":');
+    expect(rendered).not.toMatch(/-->\r?\n\{"entries":/u);
     expect(parsed).toHaveLength(50);
     expect(parsed[0]?.headSha).toBe("sha-2");
     expect(parsed.at(-1)?.headSha).toBe("sha-51");
@@ -619,6 +621,20 @@ describe("review spend accounting", () => {
     expect(
       parseSpendHistory("<!-- janitor:spend:v1 -->\nnot json\n<!-- /janitor:spend:v1 -->"),
     ).toEqual([]);
+  });
+
+  it("migrates already-published metadata whose JSON was left visible", () => {
+    const entry = completedSpendEntry("legacy-head", "succeeded", {
+      inputTokens: 12,
+      outputTokens: 4,
+    });
+    const legacy = `<!-- janitor:spend:v1 -->\n${JSON.stringify({ entries: [entry] })}\n<!-- /janitor:spend:v1 -->`;
+    const parsed = parseSpendHistory(legacy);
+
+    expect(parsed).toEqual([entry]);
+    const repaired = renderSpendHistory(parsed);
+    expect(repaired).not.toContain("<!-- janitor:spend:v1 -->");
+    expect(repaired).not.toMatch(/-->\r?\n\{"entries":/u);
   });
 
   it("drops additional oldest entries until a complete comment fits", () => {
