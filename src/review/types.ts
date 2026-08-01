@@ -116,6 +116,6 @@ export interface GitHubReviewBoundary {
   >;
   createInlineComment(finding: NewFinding, body: string, headSha: string): Promise<void>;
   resolveThread(threadId: string): Promise<void>;
-  createGeneralComment(body: string): Promise<void>;
+  createGeneralComment(body: string): Promise<number>;
   updateGeneralComment(commentId: number, body: string): Promise<void>;
 }

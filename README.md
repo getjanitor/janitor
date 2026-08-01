@@ -84,7 +84,7 @@ Configure all three values as **GitHub Actions secrets** in the repository:
 
 Optionally configure `JANITOR_VERBOSE` as a **GitHub Actions repository variable** with the value `1` to enable detailed review logs in the generated workflow.
 
-The generated pull-request workflow grants only `contents: read` and `pull-requests: write`. It uses `GITHUB_TOKEN` to post PR-level and diff comments, and it intentionally skips pull requests from forks because repository secrets and write access are unavailable to those runs. Runs are grouped by pull request and a newer event cancels an obsolete in-progress review.
+The generated pull-request workflow grants only `contents: read` and `pull-requests: write`. It uses `GITHUB_TOKEN` to update the pull request and post PR-level and diff comments. The workflow intentionally skips pull requests from forks because repository secrets and write access are unavailable to those runs. Runs are grouped by pull request and a newer event cancels an obsolete in-progress review.
 
 The selected `version` is rendered into the workflow when it is generated. Editing `version` in `janitor.toml` does not update an existing workflow; regenerate the workflow after changing it. A dedicated update command is planned but is not currently available.
 
@@ -109,9 +109,9 @@ The coding agent receives read-only repository search tools and the PR diff. It 
 - inline PR review comments anchored to the changed lines where new issues were found
 - one editable PR Conversation comment containing the overall summary, a Mermaid change map, and a confidence score from 1 to 5 with its rationale
 
-Janitor marks its comments so reruns are idempotent. Each rerun reviews the full current diff and re-evaluates Janitor's unresolved threads. Findings that are still present remain open without duplicate comments, findings explicitly verified as fixed are resolved, new findings receive new inline comments, and the existing general Conversation comment is updated.
+Janitor creates its marked general comment as soon as the first review starts, then updates that same comment with the result. Because reruns edit the original comment instead of posting another one, it keeps its early position in the Conversation while later commits and automation accumulate below it. A failed review updates the comment with a failure state.
 
-Only Janitor-authored marked threads are eligible for automatic resolution. User and third-party review threads are never changed.
+Each rerun reviews the full current diff and re-evaluates Janitor's unresolved threads. Findings that are still present remain open without duplicate comments, findings explicitly verified as fixed are resolved, and new findings receive new inline comments. Only Janitor-authored marked threads are eligible for automatic resolution; user and third-party review threads are never changed.
 
 ## Adding a command
 
