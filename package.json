@@ -1,6 +1,6 @@
 {
   "name": "@matfire/janitor",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "description": "Making sure your code is clean and secure before it ships to production.",
   "homepage": "https://github.com/matfire/janitor#readme",
   "bugs": {
