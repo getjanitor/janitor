@@ -101,7 +101,18 @@ describe("GitHub review client", () => {
                   line: 2,
                   originalLine: 2,
                   comments: {
-                    nodes: [{ databaseId: 1, body: "body", author: { login: "bot" } }],
+                    nodes: [
+                      {
+                        databaseId: 1,
+                        body: "body",
+                        author: { login: "github-actions", __typename: "Bot" },
+                      },
+                      {
+                        databaseId: 2,
+                        body: "reply",
+                        author: { login: "octocat", __typename: "User" },
+                      },
+                    ],
                   },
                 },
               ],
@@ -133,6 +144,10 @@ describe("GitHub review client", () => {
 
     const threads = await client(fake).listReviewThreads();
     expect(threads.map((thread) => thread.id)).toEqual(["one", "two"]);
+    expect(threads[0]!.comments.map((comment) => comment.author)).toEqual([
+      "github-actions[bot]",
+      "octocat",
+    ]);
     expect(fake.graphqlRequest).toHaveBeenNthCalledWith(
       2,
       expect.any(String),
