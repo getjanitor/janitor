@@ -12,7 +12,7 @@ interface ReviewThreadNode {
     nodes: Array<{
       databaseId: number | null;
       body: string;
-      author: { login: string } | null;
+      author: { login: string; __typename: string } | null;
     }>;
   };
 }
@@ -49,7 +49,7 @@ const reviewThreadsQuery = `
               nodes {
                 databaseId
                 body
-                author { login }
+                author { login __typename }
               }
             }
           }
@@ -74,6 +74,16 @@ export interface GitHubClientOptions {
   graphqlUrl: string;
   context: PullRequestContext;
   octokit?: InstanceType<typeof Octokit>;
+}
+
+// GraphQL reports bot logins without the "[bot]" suffix that REST includes
+// (e.g. "github-actions" vs "github-actions[bot]"). Normalize to the REST form
+// so ownership checks behave the same for review threads and general comments.
+function graphqlAuthorLogin(author: { login: string; __typename: string } | null): string | null {
+  if (author === null) return null;
+  return author.__typename === "Bot" && !author.login.endsWith("[bot]")
+    ? `${author.login}[bot]`
+    : author.login;
 }
 
 function graphqlBaseUrl(graphqlUrl: string): string {
@@ -163,7 +173,7 @@ export class GitHubReviewClient implements GitHubReviewBoundary {
       comments: thread.comments.nodes.map((comment) => ({
         databaseId: comment.databaseId,
         body: comment.body,
-        author: comment.author?.login ?? null,
+        author: graphqlAuthorLogin(comment.author),
       })),
     }));
   }
