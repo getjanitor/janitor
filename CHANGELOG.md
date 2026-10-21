@@ -1,3 +1,8 @@
+## [2.0.1] - 2026-10-21
+
+### ⚙️ Miscellaneous Tasks
+
+- Update repository information
 ## [0.2.0] - 2026-10-21
 
 ### 🚀 Features
