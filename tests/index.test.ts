@@ -79,6 +79,18 @@ describe("root CLI", () => {
     );
   });
 
+  it("rejects an unknown init identity", async () => {
+    const error = vi.spyOn(console, "error").mockImplementation(() => undefined);
+
+    await expectExit(
+      runCli({ argv: ["init", "--identity", "personal"], throwOnExit: true }),
+      "invalid-flag-value",
+      1,
+    );
+
+    expect(String(error.mock.calls[0]?.[0])).toContain("Use one of: github-actions, github-app.");
+  });
+
   it("rejects the removed staged review option", async () => {
     const error = vi.spyOn(console, "error").mockImplementation(() => undefined);
 
@@ -96,11 +108,18 @@ describe("command actions", () => {
   it("parses and routes init options", async () => {
     const action = vi.fn();
 
-    await runInitCommand(action, ["--janitor-version", "next", "--force"]);
+    await runInitCommand(action, [
+      "--janitor-version",
+      "next",
+      "--identity",
+      "github-app",
+      "--force",
+    ]);
 
     expect(action).toHaveBeenCalledOnce();
     expect(action).toHaveBeenCalledWith({
       force: true,
+      githubIdentity: "github-app",
       janitorVersion: "next",
     });
   });
@@ -112,6 +131,7 @@ describe("command actions", () => {
 
     expect(action).toHaveBeenCalledWith({
       force: false,
+      githubIdentity: undefined,
       janitorVersion: undefined,
     });
   });

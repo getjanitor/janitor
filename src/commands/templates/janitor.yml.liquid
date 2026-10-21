@@ -26,14 +26,23 @@ jobs:
         with:
           fetch-depth: 0
           ref: ${{ github.event.pull_request.head.sha }}
-      - name: Set up Node.js
+{% if github_app %}      - name: Create GitHub App token
+        id: app-token
+        uses: actions/create-github-app-token@v3
+        with:
+          client-id: ${{ vars.JANITOR_APP_CLIENT_ID }}
+          private-key: ${{ secrets.JANITOR_APP_PRIVATE_KEY }}
+          repositories: ${{ github.event.repository.name }}
+          permission-contents: read
+          permission-pull-requests: write
+{% endif %}      - name: Set up Node.js
         uses: actions/setup-node@v7
         with:
           node-version: 22
       - name: Review pull request
         run: npx --yes {= janitor_package | json_string =} review
         env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GITHUB_TOKEN: {% if github_app %}${{ steps.app-token.outputs.token }}{% else %}${{ secrets.GITHUB_TOKEN }}{% endif %}
           JANITOR_VERBOSE: ${{ vars.JANITOR_VERBOSE }}
           JANITOR_MODEL: ${{ secrets.JANITOR_MODEL }}
           JANITOR_PROVIDER: ${{ secrets.JANITOR_PROVIDER }}
