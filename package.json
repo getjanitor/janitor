@@ -2,15 +2,15 @@
   "name": "@matfire/janitor",
   "version": "0.2.0",
   "description": "Making sure your code is clean and secure before it ships to production.",
-  "homepage": "https://github.com/matfire/janitor#readme",
+  "homepage": "https://github.com/getjanitor/janitor#readme",
   "bugs": {
-    "url": "https://github.com/matfire/janitor/issues"
+    "url": "https://github.com/getjanitor/janitor/issues"
   },
   "license": "MIT",
   "author": "Matteo Gassend <matteo@matteogassend.com>",
   "repository": {
     "type": "git",
-    "url": "git+https://github.com/matfire/janitor.git"
+    "url": "git+https://github.com/getjanitor/janitor.git"
   },
   "bin": {
     "janitor": "./dist/index.mjs"
