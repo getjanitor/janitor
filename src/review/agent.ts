@@ -69,6 +69,8 @@ Perform this workflow completely:
    not whether you liked it. End immediately after submit_review.`;
 }
 
+const CATALOG_REFRESH_TIMEOUT_MS = 15_000;
+
 const TOOL_ACTIVITY: Record<string, string> = {
   read: "reading a repository file",
   grep: "searching repository text",
@@ -134,12 +136,25 @@ export class CodingReviewAgent implements ReviewAgentBoundary {
     };
     const { names, tools } = createReviewTools(input, output);
     const modelRuntime = await ModelRuntime.create();
-    modelRuntime.setRuntimeApiKey(this.#environment.provider, this.#environment.providerKey);
-    const model = modelRuntime.getModel(this.#environment.provider, this.#environment.model);
+    await modelRuntime.setRuntimeApiKey(this.#environment.provider, this.#environment.providerKey);
+    let model = modelRuntime.getModel(this.#environment.provider, this.#environment.model);
     if (model === undefined) {
-      throw new Error(
-        `Model ${this.#environment.provider}/${this.#environment.model} is unavailable`,
-      );
+      // setRuntimeApiKey no longer refreshes the catalog, so fetch it for models it doesn't bundle.
+      const refresh = await modelRuntime.refresh({
+        providers: [this.#environment.provider],
+        signal: AbortSignal.timeout(CATALOG_REFRESH_TIMEOUT_MS),
+      });
+      model = modelRuntime.getModel(this.#environment.provider, this.#environment.model);
+      if (model === undefined) {
+        const errors = [...refresh.errors].map(
+          ([provider, error]) => `${provider}: ${error.message}`,
+        );
+        if (refresh.aborted) errors.push(`timed out after ${CATALOG_REFRESH_TIMEOUT_MS}ms`);
+        throw new Error(
+          `Model ${this.#environment.provider}/${this.#environment.model} is unavailable` +
+            (errors.length > 0 ? ` (catalog refresh failed: ${errors.join("; ")})` : ""),
+        );
+      }
     }
 
     const settingsManager = SettingsManager.inMemory({
