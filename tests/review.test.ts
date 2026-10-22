@@ -1155,6 +1155,37 @@ describe("review reconciliation", () => {
     expect(github.updateGeneralComment).toHaveBeenCalledTimes(2);
   });
 
+  it("leaves a fixed thread open when GitHub refuses to resolve it", async () => {
+    const github = githubBoundary({ previous: true, general: true });
+    github.resolveThread.mockRejectedValueOnce(new Error("Resource not accessible by integration"));
+    const messages: string[] = [];
+
+    const result = await executeReview({
+      cwd: "/repo",
+      context,
+      git: reviewGit(),
+      github,
+      agent: agent({
+        findings: [],
+        dispositions: [
+          { threadId: "thread-1", status: "fixed", reason: "The unsafe branch was removed." },
+        ],
+        general: cleanGeneral,
+      }),
+      configLoader: async () => ({ trackedPaths: ["src/**"], trackSpend: false }),
+      report: (message) => messages.push(message),
+    });
+
+    expect(result).toEqual({ skipped: false, newFindings: 0, stillOpen: 0, fixed: 1 });
+    const generalBody = github.updateGeneralComment.mock.calls.at(-1)?.[1] as string;
+    expect(generalBody).toContain("- Fixed findings resolved: 0");
+    expect(generalBody).toContain("- Fixed findings that could not be resolved automatically: 1");
+    expect(messages).toContain(
+      "Unable to resolve fixed thread thread-1: Resource not accessible by integration; it was left open.",
+    );
+    expect(github.updatePullRequestBody.mock.calls[1]?.[0]).toContain("✅ Janitor review complete");
+  });
+
   it("updates the early general comment when the review fails", async () => {
     const github = githubBoundary();
     const failure = new Error("agent unavailable");

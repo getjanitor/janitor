@@ -105,7 +105,7 @@ export function renderOutsideDiffFindings(
   return `
 ### Findings outside the diff
 
-These findings could not be posted inline because their location is not part of the pull-request diff.
+These findings could not be posted as inline comments on the pull request.
 
 ${content}
 `;
@@ -113,7 +113,7 @@ ${content}
 
 export function renderGeneralComment(
   general: GeneralReview,
-  counts: { newFindings: number; stillOpen: number; fixed: number },
+  counts: { newFindings: number; stillOpen: number; fixed: number; unresolvedFixed?: number },
   spendHistory?: readonly ReviewSpendEntry[],
   outsideDiff = "",
 ): string {
@@ -133,7 +133,7 @@ ${general.mermaid.trim()}
 - New findings: ${counts.newFindings}
 - Existing findings still open: ${counts.stillOpen}
 - Fixed findings resolved: ${counts.fixed}
-${outsideDiff}
+${counts.unresolvedFixed ? `- Fixed findings that could not be resolved automatically: ${counts.unresolvedFixed}\n` : ""}${outsideDiff}
 ### Confidence: ${general.confidence}/5
 
 ${general.confidenceReason}

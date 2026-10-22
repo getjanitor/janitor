@@ -249,7 +249,11 @@ export async function executeReview(options: ExecuteReviewOptions): Promise<Exec
           completedSpendEntry(options.context.headSha, "succeeded", usage.snapshot()),
         )
       : [];
-    const renderGeneralBody = (outsideDiff: readonly NewFinding[], final: boolean): string => {
+    const renderGeneralBody = (
+      outsideDiff: readonly NewFinding[],
+      unresolvedFixed: number,
+      final: boolean,
+    ): string => {
       let body = "";
       // The count-only form is bounded, so findings folded after a GitHub 422
       // can never push an already-validated general body over the limit.
@@ -262,7 +266,8 @@ export async function executeReview(options: ExecuteReviewOptions): Promise<Exec
               {
                 newFindings: modelResult.findings.length,
                 stillOpen: stillOpen.length,
-                fixed: fixed.length,
+                fixed: fixed.length - unresolvedFixed,
+                unresolvedFixed,
               },
               trackSpend ? retained : undefined,
               renderOutsideDiffFindings(outsideDiff, detail),
@@ -282,8 +287,9 @@ export async function executeReview(options: ExecuteReviewOptions): Promise<Exec
       }
       throw new Error("General review exceeds GitHub's comment size limit");
     };
-    // Fail before any GitHub mutation when the known general body cannot fit.
-    renderGeneralBody(outsideDiffFindings, false);
+    // Fail before any GitHub mutation when the known general body cannot fit,
+    // assuming every fixed thread may need the unresolved-findings note.
+    renderGeneralBody(outsideDiffFindings, fixed.length, false);
 
     report("Publishing validated review feedback to GitHub.");
     for (const finding of inlineFindings) {
@@ -301,12 +307,22 @@ export async function executeReview(options: ExecuteReviewOptions): Promise<Exec
         outsideDiffFindings.push(finding);
       }
     }
+    let unresolvedFixed = 0;
     for (const disposition of fixed) {
-      await options.github.resolveThread(disposition.threadId);
+      // A thread GitHub refuses to resolve (e.g. a token without permission)
+      // stays open; it must not discard the rest of an otherwise complete review.
+      try {
+        await options.github.resolveThread(disposition.threadId);
+      } catch (error) {
+        unresolvedFixed++;
+        report(
+          `Unable to resolve fixed thread ${disposition.threadId}: ${errorMessage(error)}; it was left open.`,
+        );
+      }
     }
     await options.github.updateGeneralComment(
       generalCommentId,
-      renderGeneralBody(outsideDiffFindings, true),
+      renderGeneralBody(outsideDiffFindings, unresolvedFixed, true),
     );
     if (trackSpend) spendHistory = successfulSpendHistory;
     report("Review feedback published to GitHub.");
