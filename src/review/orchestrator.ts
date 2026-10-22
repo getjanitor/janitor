@@ -7,6 +7,7 @@ import {
   renderFindingComment,
   renderGeneralComment,
   renderGeneralCommentStatus,
+  renderOutsideDiffFindings,
   type ReviewDescriptionStatus,
 } from "#/review/markers";
 import { requireValidModelText } from "#/review/model_result";
@@ -20,6 +21,7 @@ import {
 import type {
   GitCommandBoundary,
   GitHubReviewBoundary,
+  NewFinding,
   PullRequestContext,
   ReviewAgentBoundary,
   ReviewSpendEntry,
@@ -47,7 +49,6 @@ export interface ExecuteReviewResult {
 function validateModelResult(
   result: Awaited<ReturnType<ReviewAgentBoundary["run"]>>,
   previous: ReturnType<typeof findOpenJanitorFindings>,
-  diff: Awaited<ReturnType<typeof collectReviewDiff>>,
 ): void {
   if (result.general === undefined) {
     throw new Error("Model review did not submit a general result");
@@ -97,11 +98,6 @@ function validateModelResult(
     }
     if (!Number.isInteger(finding.line) || finding.line < 1) {
       throw new Error(`Model review returned invalid line ${finding.line}`);
-    }
-    if (!isCommentableLocation(diff, finding.path, finding.side, finding.line)) {
-      throw new Error(
-        `Model finding location is not a changed line: ${finding.path}:${finding.line} (${finding.side})`,
-      );
     }
     const key = `${finding.path}\0${finding.side}\0${finding.line}\0${finding.title.trim().toLowerCase()}`;
     if (findingKeys.has(key)) {
@@ -156,6 +152,12 @@ async function publishDescriptionStatus(
 
 function errorMessage(error: unknown): string {
   return error instanceof Error ? error.message : String(error);
+}
+
+// GitHub answers 422 when an inline comment's line cannot be resolved against
+// its own view of the pull-request diff, even if the local diff accepted it.
+function isUnprocessableLocation(error: unknown): boolean {
+  return typeof error === "object" && error !== null && "status" in error && error.status === 422;
 }
 
 export async function executeReview(options: ExecuteReviewOptions): Promise<ExecuteReviewResult> {
@@ -221,8 +223,21 @@ export async function executeReview(options: ExecuteReviewOptions): Promise<Exec
       trackSpend ? usage.report : undefined,
     );
     report("Coding review agent finished; validating its output.");
-    validateModelResult(modelResult, previousFindings, diff);
+    validateModelResult(modelResult, previousFindings);
     report("Agent output validated successfully.");
+
+    const inlineFindings: NewFinding[] = [];
+    const outsideDiffFindings: NewFinding[] = [];
+    for (const finding of modelResult.findings) {
+      if (isCommentableLocation(diff, finding.path, finding.side, finding.line)) {
+        inlineFindings.push(finding);
+      } else {
+        report(
+          `Finding at ${finding.path}:${finding.line} (${finding.side}) is outside the diff; it will be included in the general comment.`,
+        );
+        outsideDiffFindings.push(finding);
+      }
+    }
 
     const fixed = modelResult.dispositions.filter((disposition) => disposition.status === "fixed");
     const stillOpen = modelResult.dispositions.filter(
@@ -234,36 +249,77 @@ export async function executeReview(options: ExecuteReviewOptions): Promise<Exec
           completedSpendEntry(options.context.headSha, "succeeded", usage.snapshot()),
         )
       : [];
-    const { body: generalBody } = trimSpendHistoryToFit(
-      successfulSpendHistory,
-      (retained) =>
-        renderGeneralComment(
-          modelResult.general!,
-          {
-            newFindings: modelResult.findings.length,
-            stillOpen: stillOpen.length,
-            fixed: fixed.length,
-          },
-          trackSpend ? retained : undefined,
-        ),
-      GITHUB_COMMENT_LIMIT,
-    );
-    if (generalBody.length > GITHUB_COMMENT_LIMIT) {
+    type OutsideDiffDetail = Parameters<typeof renderOutsideDiffFindings>[1];
+    const renderGeneralBody = (
+      outsideDiff: readonly NewFinding[],
+      unresolvedFixed: number,
+      details: readonly OutsideDiffDetail[] = ["full", "compact", "count"],
+    ): { body: string; detail: OutsideDiffDetail } => {
+      for (const detail of details) {
+        const { body } = trimSpendHistoryToFit(
+          successfulSpendHistory,
+          (retained) =>
+            renderGeneralComment(
+              modelResult.general!,
+              {
+                newFindings: modelResult.findings.length,
+                stillOpen: stillOpen.length,
+                fixed: fixed.length - unresolvedFixed,
+                unresolvedFixed,
+              },
+              trackSpend ? retained : undefined,
+              renderOutsideDiffFindings(outsideDiff, detail),
+            ),
+          GITHUB_COMMENT_LIMIT,
+        );
+        if (body.length <= GITHUB_COMMENT_LIMIT) return { body, detail };
+      }
       throw new Error("General review exceeds GitHub's comment size limit");
-    }
+    };
+    // Fail before any GitHub mutation unless the worst case fits: every finding
+    // folded after a 422 and every fixed thread left unresolved. The count-only
+    // section grows only with the number of digits, so the final render is then
+    // guaranteed to fit at some detail level.
+    renderGeneralBody(modelResult.findings, fixed.length, ["count"]);
 
     report("Publishing validated review feedback to GitHub.");
-    for (const finding of modelResult.findings) {
-      await options.github.createInlineComment(
-        finding,
-        renderFindingComment(finding),
-        options.context.headSha,
-      );
+    for (const finding of inlineFindings) {
+      try {
+        await options.github.createInlineComment(
+          finding,
+          renderFindingComment(finding),
+          options.context.headSha,
+        );
+      } catch (error) {
+        if (!isUnprocessableLocation(error)) throw error;
+        report(
+          `GitHub rejected the inline location ${finding.path}:${finding.line} (${finding.side}): ${errorMessage(error)}; it will be included in the general comment.`,
+        );
+        outsideDiffFindings.push(finding);
+      }
     }
+    let unresolvedFixed = 0;
     for (const disposition of fixed) {
-      await options.github.resolveThread(disposition.threadId);
+      // A thread GitHub refuses to resolve (e.g. a token without permission)
+      // stays open; it must not discard the rest of an otherwise complete review.
+      try {
+        await options.github.resolveThread(disposition.threadId);
+      } catch (error) {
+        unresolvedFixed++;
+        report(
+          `Unable to resolve fixed thread ${disposition.threadId}: ${errorMessage(error)}; it was left open.`,
+        );
+      }
     }
-    await options.github.updateGeneralComment(generalCommentId, generalBody);
+    const general = renderGeneralBody(outsideDiffFindings, unresolvedFixed);
+    if (general.detail === "count") {
+      for (const finding of outsideDiffFindings) {
+        report(
+          `Finding outside the diff omitted from the general comment: ${finding.severity.toUpperCase()}: ${finding.title} at ${finding.path}:${finding.line} (${finding.side})`,
+        );
+      }
+    }
+    await options.github.updateGeneralComment(generalCommentId, general.body);
     if (trackSpend) spendHistory = successfulSpendHistory;
     report("Review feedback published to GitHub.");
 
