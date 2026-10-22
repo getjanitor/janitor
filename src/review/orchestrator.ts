@@ -249,16 +249,14 @@ export async function executeReview(options: ExecuteReviewOptions): Promise<Exec
           completedSpendEntry(options.context.headSha, "succeeded", usage.snapshot()),
         )
       : [];
+    type OutsideDiffDetail = Parameters<typeof renderOutsideDiffFindings>[1];
     const renderGeneralBody = (
       outsideDiff: readonly NewFinding[],
       unresolvedFixed: number,
-      final: boolean,
-    ): string => {
-      let body = "";
-      // The count-only form is bounded, so findings folded after a GitHub 422
-      // can never push an already-validated general body over the limit.
-      for (const detail of ["full", "compact", "count"] as const) {
-        ({ body } = trimSpendHistoryToFit(
+      details: readonly OutsideDiffDetail[] = ["full", "compact", "count"],
+    ): { body: string; detail: OutsideDiffDetail } => {
+      for (const detail of details) {
+        const { body } = trimSpendHistoryToFit(
           successfulSpendHistory,
           (retained) =>
             renderGeneralComment(
@@ -273,23 +271,16 @@ export async function executeReview(options: ExecuteReviewOptions): Promise<Exec
               renderOutsideDiffFindings(outsideDiff, detail),
             ),
           GITHUB_COMMENT_LIMIT,
-        ));
-        if (body.length <= GITHUB_COMMENT_LIMIT) {
-          if (final && detail === "count") {
-            for (const finding of outsideDiff) {
-              report(
-                `Finding outside the diff omitted from the general comment: ${finding.severity.toUpperCase()}: ${finding.title} at ${finding.path}:${finding.line} (${finding.side})`,
-              );
-            }
-          }
-          return body;
-        }
+        );
+        if (body.length <= GITHUB_COMMENT_LIMIT) return { body, detail };
       }
       throw new Error("General review exceeds GitHub's comment size limit");
     };
-    // Fail before any GitHub mutation when the known general body cannot fit,
-    // assuming every fixed thread may need the unresolved-findings note.
-    renderGeneralBody(outsideDiffFindings, fixed.length, false);
+    // Fail before any GitHub mutation unless the worst case fits: every finding
+    // folded after a 422 and every fixed thread left unresolved. The count-only
+    // section grows only with the number of digits, so the final render is then
+    // guaranteed to fit at some detail level.
+    renderGeneralBody(modelResult.findings, fixed.length, ["count"]);
 
     report("Publishing validated review feedback to GitHub.");
     for (const finding of inlineFindings) {
@@ -320,10 +311,15 @@ export async function executeReview(options: ExecuteReviewOptions): Promise<Exec
         );
       }
     }
-    await options.github.updateGeneralComment(
-      generalCommentId,
-      renderGeneralBody(outsideDiffFindings, unresolvedFixed, true),
-    );
+    const general = renderGeneralBody(outsideDiffFindings, unresolvedFixed);
+    if (general.detail === "count") {
+      for (const finding of outsideDiffFindings) {
+        report(
+          `Finding outside the diff omitted from the general comment: ${finding.severity.toUpperCase()}: ${finding.title} at ${finding.path}:${finding.line} (${finding.side})`,
+        );
+      }
+    }
+    await options.github.updateGeneralComment(generalCommentId, general.body);
     if (trackSpend) spendHistory = successfulSpendHistory;
     report("Review feedback published to GitHub.");
 

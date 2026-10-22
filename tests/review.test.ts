@@ -1029,6 +1029,40 @@ describe("review reconciliation", () => {
     expect(github.updatePullRequestBody.mock.calls[1]?.[0]).toContain("✅ Janitor review complete");
   });
 
+  it("rejects near-limit general content before publishing when fallbacks could overflow", async () => {
+    const github = githubBoundary();
+    const baseLength = renderGeneralComment(cleanGeneral, {
+      newFindings: 1,
+      stillOpen: 0,
+      fixed: 0,
+    }).length;
+    const general = {
+      ...cleanGeneral,
+      summary: cleanGeneral.summary + "s".repeat(65_536 - baseLength - 10),
+    };
+
+    await expect(
+      execute(
+        {
+          findings: [
+            {
+              title: "Incorrect replacement",
+              body: "This changes the behavior unexpectedly.",
+              severity: "high",
+              path: "src/a.ts",
+              side: "RIGHT",
+              line: 2,
+            },
+          ],
+          dispositions: [],
+          general,
+        },
+        github,
+      ),
+    ).rejects.toThrow(/comment size limit/u);
+    expect(github.createInlineComment).not.toHaveBeenCalled();
+  });
+
   it("continues the review when the running status cannot be published", async () => {
     const github = githubBoundary();
     github.getPullRequestBody.mockRejectedValueOnce(new Error("status unavailable"));
