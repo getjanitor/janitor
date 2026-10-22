@@ -848,6 +848,151 @@ describe("review reconciliation", () => {
     expect(github.updatePullRequestBody.mock.calls[1]?.[0]).toContain("✅ Janitor review complete");
   });
 
+  it("folds findings outside the diff into the general comment instead of failing", async () => {
+    const github = githubBoundary();
+    const result = await execute(
+      {
+        findings: [
+          {
+            title: "Incorrect replacement",
+            body: "This changes the behavior unexpectedly.",
+            severity: "high",
+            path: "src/a.ts",
+            side: "RIGHT",
+            line: 2,
+          },
+          {
+            title: "Unchanged caller breaks",
+            body: "The caller still passes the old argument.",
+            severity: "medium",
+            path: "src/a.ts",
+            side: "RIGHT",
+            line: 99,
+          },
+          {
+            title: "Untouched file depends on old shape",
+            body: "This file was not changed but relies on the removed field.",
+            severity: "low",
+            path: "src/untouched.ts",
+            side: "RIGHT",
+            line: 4,
+          },
+        ],
+        dispositions: [],
+        general: cleanGeneral,
+      },
+      github,
+    );
+
+    expect(result).toEqual({ skipped: false, newFindings: 3, stillOpen: 0, fixed: 0 });
+    expect(github.createInlineComment).toHaveBeenCalledOnce();
+    expect(github.createInlineComment.mock.calls[0]?.[0]).toMatchObject({ line: 2 });
+    const generalBody = github.updateGeneralComment.mock.calls.at(-1)?.[1] as string;
+    expect(generalBody).toContain("### Findings outside the diff");
+    expect(generalBody).toContain(
+      "**MEDIUM: Unchanged caller breaks**\n`src/a.ts` line 99 (RIGHT)",
+    );
+    expect(generalBody).toContain("The caller still passes the old argument.");
+    expect(generalBody).toContain(
+      "**LOW: Untouched file depends on old shape**\n`src/untouched.ts` line 4 (RIGHT)",
+    );
+    expect(generalBody).not.toContain("Incorrect replacement");
+    expect(github.updatePullRequestBody.mock.calls[1]?.[0]).toContain("✅ Janitor review complete");
+  });
+
+  it("folds a finding into the general comment when GitHub rejects its inline location", async () => {
+    const github = githubBoundary();
+    github.createInlineComment.mockRejectedValueOnce(
+      Object.assign(new Error("Line could not be resolved"), { status: 422 }),
+    );
+    const messages: string[] = [];
+    const finding = {
+      title: "Incorrect replacement",
+      body: "This changes the behavior unexpectedly.",
+      severity: "high" as const,
+      path: "src/a.ts",
+      side: "RIGHT" as const,
+      line: 2,
+    };
+
+    const result = await executeReview({
+      cwd: "/repo",
+      context,
+      git: reviewGit(),
+      github,
+      agent: agent({
+        findings: [finding, { ...finding, title: "Second issue", side: "LEFT" }],
+        dispositions: [],
+        general: cleanGeneral,
+      }),
+      configLoader: async () => ({ trackedPaths: ["src/**"], trackSpend: false }),
+      report: (message) => messages.push(message),
+    });
+
+    expect(result).toEqual({ skipped: false, newFindings: 2, stillOpen: 0, fixed: 0 });
+    expect(github.createInlineComment).toHaveBeenCalledTimes(2);
+    const generalBody = github.updateGeneralComment.mock.calls.at(-1)?.[1] as string;
+    expect(generalBody).toContain("**HIGH: Incorrect replacement**\n`src/a.ts` line 2 (RIGHT)");
+    expect(generalBody).not.toContain("Second issue");
+    expect(messages).toContain(
+      "GitHub rejected the inline location src/a.ts:2 (RIGHT): Line could not be resolved; it will be included in the general comment.",
+    );
+  });
+
+  it("still fails the review for inline comment errors other than an invalid location", async () => {
+    const github = githubBoundary();
+    github.createInlineComment.mockRejectedValueOnce(
+      Object.assign(new Error("Bad credentials"), { status: 401 }),
+    );
+
+    await expect(
+      execute(
+        {
+          findings: [
+            {
+              title: "Incorrect replacement",
+              body: "This changes the behavior unexpectedly.",
+              severity: "high",
+              path: "src/a.ts",
+              side: "RIGHT",
+              line: 2,
+            },
+          ],
+          dispositions: [],
+          general: cleanGeneral,
+        },
+        github,
+      ),
+    ).rejects.toThrow("Bad credentials");
+    expect(github.updateGeneralComment).toHaveBeenLastCalledWith(
+      10,
+      expect.stringContaining("Review failed"),
+    );
+  });
+
+  it("lists outside-diff findings compactly when their full bodies would not fit", async () => {
+    const github = githubBoundary();
+    const largeFinding = (line: number) => ({
+      title: `Large issue ${line}`,
+      body: "x".repeat(40_000),
+      severity: "medium" as const,
+      path: "src/other.ts",
+      side: "RIGHT" as const,
+      line,
+    });
+
+    await execute(
+      { findings: [largeFinding(1), largeFinding(2)], dispositions: [], general: cleanGeneral },
+      github,
+    );
+
+    const generalBody = github.updateGeneralComment.mock.calls.at(-1)?.[1] as string;
+    expect(generalBody.length).toBeLessThanOrEqual(65_536);
+    expect(generalBody).toContain("- **MEDIUM: Large issue 1** — `src/other.ts` line 1 (RIGHT)");
+    expect(generalBody).toContain("- **MEDIUM: Large issue 2** — `src/other.ts` line 2 (RIGHT)");
+    expect(generalBody).not.toContain("xxxx");
+  });
+
   it("continues the review when the running status cannot be published", async () => {
     const github = githubBoundary();
     github.getPullRequestBody.mockRejectedValueOnce(new Error("status unavailable"));
@@ -1019,7 +1164,7 @@ describe("review reconciliation", () => {
         },
         github,
       ),
-    ).rejects.toThrow(/omitted dispositions|not a changed line/u);
+    ).rejects.toThrow(/omitted dispositions/u);
     expect(github.createInlineComment).not.toHaveBeenCalled();
     expect(github.resolveThread).not.toHaveBeenCalled();
     expect(github.createGeneralComment).toHaveBeenCalledWith(

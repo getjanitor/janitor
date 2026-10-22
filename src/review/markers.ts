@@ -78,10 +78,38 @@ export function renderGeneralCommentStatus(
   return `${GENERAL_REVIEW_MARKER}\n## Janitor review\n\n${message}\n${renderSpendHistory(spendHistory ?? [])}`;
 }
 
+function findingLocation(finding: NewFinding): string {
+  return `\`${finding.path}\` line ${finding.line} (${finding.side})`;
+}
+
+// GitHub only accepts inline review comments on lines that are part of the
+// pull-request diff. Findings that cannot be anchored there are folded into the
+// general comment so one misplaced anchor never discards the whole review.
+export function renderOutsideDiffFindings(
+  findings: readonly NewFinding[],
+  detail: "full" | "compact" = "full",
+): string {
+  if (findings.length === 0) return "";
+  const entries = findings.map((finding) => {
+    const heading = `**${finding.severity.toUpperCase()}: ${finding.title}**`;
+    return detail === "full"
+      ? `${heading}\n${findingLocation(finding)}\n\n${finding.body}`
+      : `- ${heading} — ${findingLocation(finding)}`;
+  });
+  return `
+### Findings outside the diff
+
+These findings could not be posted inline because their location is not part of the pull-request diff.
+
+${entries.join(detail === "full" ? "\n\n" : "\n")}
+`;
+}
+
 export function renderGeneralComment(
   general: GeneralReview,
   counts: { newFindings: number; stillOpen: number; fixed: number },
   spendHistory?: readonly ReviewSpendEntry[],
+  outsideDiff = "",
 ): string {
   return `${GENERAL_REVIEW_MARKER}
 ## Janitor review
@@ -99,7 +127,7 @@ ${general.mermaid.trim()}
 - New findings: ${counts.newFindings}
 - Existing findings still open: ${counts.stillOpen}
 - Fixed findings resolved: ${counts.fixed}
-
+${outsideDiff}
 ### Confidence: ${general.confidence}/5
 
 ${general.confidenceReason}
