@@ -7,6 +7,7 @@ import {
   renderFindingComment,
   renderGeneralComment,
   renderGeneralCommentStatus,
+  type GeneralCommentFinding,
   type ReviewDescriptionStatus,
 } from "#/review/markers";
 import { requireValidModelText } from "#/review/model_result";
@@ -234,35 +235,42 @@ export async function executeReview(options: ExecuteReviewOptions): Promise<Exec
           completedSpendEntry(options.context.headSha, "succeeded", usage.snapshot()),
         )
       : [];
-    const { body: generalBody } = trimSpendHistoryToFit(
-      successfulSpendHistory,
-      (retained) =>
-        renderGeneralComment(
-          modelResult.general!,
-          {
-            newFindings: modelResult.findings.length,
-            stillOpen: stillOpen.length,
-            fixed: fixed.length,
-          },
-          trackSpend ? retained : undefined,
-        ),
-      GITHUB_COMMENT_LIMIT,
-    );
-    if (generalBody.length > GITHUB_COMMENT_LIMIT) {
+    const counts = { stillOpen: stillOpen.length, fixed: fixed.length };
+    const renderGeneralBody = (findings: readonly GeneralCommentFinding[]) =>
+      trimSpendHistoryToFit(
+        successfulSpendHistory,
+        (retained) =>
+          renderGeneralComment(
+            modelResult.general!,
+            findings,
+            counts,
+            trackSpend ? retained : undefined,
+          ),
+        GITHUB_COMMENT_LIMIT,
+      ).body;
+    // Validate the unlinked body before publishing anything; comment URLs are
+    // only known once the inline comments exist.
+    const unlinkedGeneralBody = renderGeneralBody(modelResult.findings);
+    if (unlinkedGeneralBody.length > GITHUB_COMMENT_LIMIT) {
       throw new Error("General review exceeds GitHub's comment size limit");
     }
 
     report("Publishing validated review feedback to GitHub.");
+    const linkedFindings: GeneralCommentFinding[] = [];
     for (const finding of modelResult.findings) {
-      await options.github.createInlineComment(
+      const url = await options.github.createInlineComment(
         finding,
         renderFindingComment(finding),
         options.context.headSha,
       );
+      linkedFindings.push({ title: finding.title, severity: finding.severity, url });
     }
     for (const disposition of fixed) {
       await options.github.resolveThread(disposition.threadId);
     }
+    const linkedGeneralBody = renderGeneralBody(linkedFindings);
+    const generalBody =
+      linkedGeneralBody.length > GITHUB_COMMENT_LIMIT ? unlinkedGeneralBody : linkedGeneralBody;
     await options.github.updateGeneralComment(generalCommentId, generalBody);
     if (trackSpend) spendHistory = successfulSpendHistory;
     report("Review feedback published to GitHub.");

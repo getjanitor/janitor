@@ -127,7 +127,7 @@ function githubBoundary(
           ]
         : [],
     ),
-    createInlineComment: vi.fn(async () => undefined),
+    createInlineComment: vi.fn(async (): Promise<string | undefined> => "https://github.com/c/1"),
     resolveThread: vi.fn(async () => undefined),
     createGeneralComment: vi.fn(async () => 10),
     updateGeneralComment: vi.fn(async () => undefined),
@@ -496,14 +496,30 @@ describe("Janitor markers and prompt", () => {
   });
 
   it("renders one marked general comment with diagram and confidence", () => {
-    const body = renderGeneralComment(cleanGeneral, {
-      newFindings: 0,
-      stillOpen: 0,
-      fixed: 0,
-    });
+    const body = renderGeneralComment(cleanGeneral, [], { stillOpen: 0, fixed: 0 });
     expect(body).toContain(GENERAL_REVIEW_MARKER);
     expect(body).toContain("```mermaid");
     expect(body).toContain("Confidence: 4/5");
+    expect(body).toContain("No new findings.");
+  });
+
+  it("lists findings with severity badges and links ahead of the summary", () => {
+    const body = renderGeneralComment(
+      cleanGeneral,
+      [
+        { title: "Reviews change\nwithout updates", severity: "medium", url: "https://x/c/1" },
+        { title: "Unlinked", severity: "critical" },
+      ],
+      { stillOpen: 2, fixed: 1 },
+    );
+    expect(body).toContain(
+      "1. ![medium](https://img.shields.io/badge/medium-yellow) **Reviews change without updates** [►](https://x/c/1)",
+    );
+    expect(body).toContain(
+      "2. ![critical](https://img.shields.io/badge/critical-critical) **Unlinked**\n",
+    );
+    expect(body).toContain("Existing findings still open: 2 · Fixed findings resolved: 1");
+    expect(body.indexOf("### Findings")).toBeLessThan(body.indexOf("### Summary"));
   });
 
   it("instructs the agent to map usages and explicitly disposition old threads", () => {
@@ -839,6 +855,10 @@ describe("review reconciliation", () => {
     expect(github.updateGeneralComment).toHaveBeenCalledWith(
       10,
       expect.stringContaining("Confidence: 4/5"),
+    );
+    expect(github.updateGeneralComment).toHaveBeenLastCalledWith(
+      10,
+      expect.stringContaining("**Incorrect replacement** [►](https://github.com/c/1)"),
     );
     expect(github.getPullRequestBody).toHaveBeenCalledTimes(2);
     expect(github.updatePullRequestBody).toHaveBeenCalledTimes(2);

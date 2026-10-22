@@ -157,7 +157,9 @@ describe("GitHub review client", () => {
 
   it("maps inline, resolution, and general-comment mutations to Octokit", async () => {
     const fake = createFakeOctokit();
-    fake.octokit.rest.pulls.createReviewComment.mockResolvedValue({});
+    fake.octokit.rest.pulls.createReviewComment.mockResolvedValue({
+      data: { html_url: "https://github.example/pr/4#discussion_r1" },
+    });
     fake.octokit.rest.issues.createComment.mockResolvedValue({ data: { id: 13 } });
     fake.octokit.rest.issues.updateComment.mockResolvedValue({});
     fake.graphqlRequest.mockResolvedValue({ resolveReviewThread: { thread: { id: "t" } } });
@@ -171,7 +173,9 @@ describe("GitHub review client", () => {
       line: 2,
     };
 
-    await github.createInlineComment(finding, "rendered", "head");
+    await expect(github.createInlineComment(finding, "rendered", "head")).resolves.toBe(
+      "https://github.example/pr/4#discussion_r1",
+    );
     await github.resolveThread("thread");
     await expect(github.createGeneralComment("general")).resolves.toBe(13);
     await github.updateGeneralComment(8, "updated");

@@ -1,6 +1,12 @@
 import { renderSpendHistory } from "#/review/spend";
 export { SPEND_METADATA_MARKER } from "#/review/spend";
-import type { ExistingFinding, GeneralReview, NewFinding, ReviewSpendEntry } from "#/review/types";
+import type {
+  ExistingFinding,
+  FindingSeverity,
+  GeneralReview,
+  NewFinding,
+  ReviewSpendEntry,
+} from "#/review/types";
 
 const JANITOR_MARKER_NAMESPACE = "janitor:";
 
@@ -78,13 +84,50 @@ export function renderGeneralCommentStatus(
   return `${GENERAL_REVIEW_MARKER}\n## Janitor review\n\n${message}\n${renderSpendHistory(spendHistory ?? [])}`;
 }
 
+const SEVERITY_BADGE_COLOR: Record<FindingSeverity, string> = {
+  critical: "critical",
+  high: "orange",
+  medium: "yellow",
+  low: "lightgrey",
+};
+
+export interface GeneralCommentFinding {
+  title: string;
+  severity: FindingSeverity;
+  url?: string;
+}
+
+function renderSeverityBadge(severity: FindingSeverity): string {
+  return `![${severity}](https://img.shields.io/badge/${severity}-${SEVERITY_BADGE_COLOR[severity]})`;
+}
+
+function renderFindingsSection(
+  findings: readonly GeneralCommentFinding[],
+  counts: { stillOpen: number; fixed: number },
+): string {
+  const items = findings.map((finding, index) => {
+    const title = finding.title.replace(/\s+/gu, " ").trim();
+    const link = finding.url === undefined ? "" : ` [►](${finding.url})`;
+    return `${index + 1}. ${renderSeverityBadge(finding.severity)} **${title}**${link}`;
+  });
+  const list = items.length === 0 ? "No new findings." : items.join("\n");
+  return `${list}\n\nExisting findings still open: ${counts.stillOpen} · Fixed findings resolved: ${counts.fixed}`;
+}
+
 export function renderGeneralComment(
   general: GeneralReview,
-  counts: { newFindings: number; stillOpen: number; fixed: number },
+  findings: readonly GeneralCommentFinding[],
+  counts: { stillOpen: number; fixed: number },
   spendHistory?: readonly ReviewSpendEntry[],
 ): string {
   return `${GENERAL_REVIEW_MARKER}
 ## Janitor review
+
+### Findings
+
+${renderFindingsSection(findings, counts)}
+
+### Summary
 
 ${general.summary}
 
@@ -93,12 +136,6 @@ ${general.summary}
 \`\`\`mermaid
 ${general.mermaid.trim()}
 \`\`\`
-
-### Findings
-
-- New findings: ${counts.newFindings}
-- Existing findings still open: ${counts.stillOpen}
-- Fixed findings resolved: ${counts.fixed}
 
 ### Confidence: ${general.confidence}/5
 

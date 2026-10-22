@@ -128,7 +128,12 @@ export interface GitHubReviewBoundary {
       comments: Array<{ databaseId: number | null; body: string; author: string | null }>;
     }>
   >;
-  createInlineComment(finding: NewFinding, body: string, headSha: string): Promise<void>;
+  /** Returns the created comment's web URL, when GitHub provides one. */
+  createInlineComment(
+    finding: NewFinding,
+    body: string,
+    headSha: string,
+  ): Promise<string | undefined>;
   resolveThread(threadId: string): Promise<void>;
   createGeneralComment(body: string): Promise<number>;
   updateGeneralComment(commentId: number, body: string): Promise<void>;

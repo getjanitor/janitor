@@ -3,6 +3,7 @@
 ### ⚙️ Miscellaneous Tasks
 
 - Update repository information
+
 ## [0.2.0] - 2026-10-21
 
 ### 🚀 Features
@@ -25,6 +26,7 @@
 - Use local source instead of released version
 - Add dependabot for updates
 - Upgrade pi-coding-agent to 1.3
+
 ## [0.1.0] - 2026-07-27
 
 ### 🚀 Features
