@@ -87,21 +87,27 @@ function findingLocation(finding: NewFinding): string {
 // general comment so one misplaced anchor never discards the whole review.
 export function renderOutsideDiffFindings(
   findings: readonly NewFinding[],
-  detail: "full" | "compact" = "full",
+  detail: "full" | "compact" | "count" = "full",
 ): string {
   if (findings.length === 0) return "";
-  const entries = findings.map((finding) => {
-    const heading = `**${finding.severity.toUpperCase()}: ${finding.title}**`;
-    return detail === "full"
-      ? `${heading}\n${findingLocation(finding)}\n\n${finding.body}`
-      : `- ${heading} — ${findingLocation(finding)}`;
-  });
+  const heading = (finding: NewFinding) =>
+    `**${finding.severity.toUpperCase()}: ${finding.title}**`;
+  const content =
+    detail === "full"
+      ? findings
+          .map((finding) => `${heading(finding)}\n${findingLocation(finding)}\n\n${finding.body}`)
+          .join("\n\n")
+      : detail === "compact"
+        ? findings
+            .map((finding) => `- ${heading(finding)} — ${findingLocation(finding)}`)
+            .join("\n")
+        : `${findings.length} finding(s) were too large to list here; see the workflow logs for their titles and locations.`;
   return `
 ### Findings outside the diff
 
 These findings could not be posted inline because their location is not part of the pull-request diff.
 
-${entries.join(detail === "full" ? "\n\n" : "\n")}
+${content}
 `;
 }
 

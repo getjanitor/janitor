@@ -993,6 +993,42 @@ describe("review reconciliation", () => {
     expect(generalBody).not.toContain("xxxx");
   });
 
+  it("keeps a published review when 422 fallbacks would overflow the compact list", async () => {
+    const github = githubBoundary();
+    github.createInlineComment.mockRejectedValue(
+      Object.assign(new Error("Line could not be resolved"), { status: 422 }),
+    );
+    const messages: string[] = [];
+    const findings = [1, 2].map((index) => ({
+      title: `${"t".repeat(40_000)} ${index}`,
+      body: "Impact",
+      severity: "low" as const,
+      path: "src/a.ts",
+      side: "RIGHT" as const,
+      line: 2,
+    }));
+
+    const result = await executeReview({
+      cwd: "/repo",
+      context,
+      git: reviewGit(),
+      github,
+      agent: agent({ findings, dispositions: [], general: cleanGeneral }),
+      configLoader: async () => ({ trackedPaths: ["src/**"], trackSpend: false }),
+      report: (message) => messages.push(message),
+    });
+
+    expect(result).toEqual({ skipped: false, newFindings: 2, stillOpen: 0, fixed: 0 });
+    const generalBody = github.updateGeneralComment.mock.calls.at(-1)?.[1] as string;
+    expect(generalBody.length).toBeLessThanOrEqual(65_536);
+    expect(generalBody).toContain("2 finding(s) were too large to list here");
+    expect(generalBody).toContain("Confidence: 4/5");
+    expect(
+      messages.filter((message) => message.startsWith("Finding outside the diff omitted")),
+    ).toHaveLength(2);
+    expect(github.updatePullRequestBody.mock.calls[1]?.[0]).toContain("✅ Janitor review complete");
+  });
+
   it("continues the review when the running status cannot be published", async () => {
     const github = githubBoundary();
     github.getPullRequestBody.mockRejectedValueOnce(new Error("status unavailable"));

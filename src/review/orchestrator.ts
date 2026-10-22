@@ -249,9 +249,11 @@ export async function executeReview(options: ExecuteReviewOptions): Promise<Exec
           completedSpendEntry(options.context.headSha, "succeeded", usage.snapshot()),
         )
       : [];
-    const renderGeneralBody = (outsideDiff: readonly NewFinding[]): string => {
+    const renderGeneralBody = (outsideDiff: readonly NewFinding[], final: boolean): string => {
       let body = "";
-      for (const detail of ["full", "compact"] as const) {
+      // The count-only form is bounded, so findings folded after a GitHub 422
+      // can never push an already-validated general body over the limit.
+      for (const detail of ["full", "compact", "count"] as const) {
         ({ body } = trimSpendHistoryToFit(
           successfulSpendHistory,
           (retained) =>
@@ -267,12 +269,21 @@ export async function executeReview(options: ExecuteReviewOptions): Promise<Exec
             ),
           GITHUB_COMMENT_LIMIT,
         ));
-        if (body.length <= GITHUB_COMMENT_LIMIT) return body;
+        if (body.length <= GITHUB_COMMENT_LIMIT) {
+          if (final && detail === "count") {
+            for (const finding of outsideDiff) {
+              report(
+                `Finding outside the diff omitted from the general comment: ${finding.severity.toUpperCase()}: ${finding.title} at ${finding.path}:${finding.line} (${finding.side})`,
+              );
+            }
+          }
+          return body;
+        }
       }
       throw new Error("General review exceeds GitHub's comment size limit");
     };
     // Fail before any GitHub mutation when the known general body cannot fit.
-    renderGeneralBody(outsideDiffFindings);
+    renderGeneralBody(outsideDiffFindings, false);
 
     report("Publishing validated review feedback to GitHub.");
     for (const finding of inlineFindings) {
@@ -295,7 +306,7 @@ export async function executeReview(options: ExecuteReviewOptions): Promise<Exec
     }
     await options.github.updateGeneralComment(
       generalCommentId,
-      renderGeneralBody(outsideDiffFindings),
+      renderGeneralBody(outsideDiffFindings, true),
     );
     if (trackSpend) spendHistory = successfulSpendHistory;
     report("Review feedback published to GitHub.");
