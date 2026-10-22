@@ -43,18 +43,20 @@ janitor init
 When omitted from the command line, the initializer prompts for:
 
 - the Janitor npm version or tag used by the workflow (default: `latest`)
+- the GitHub identity that posts reviews (default: `github-actions`)
 - confirmation before replacing each changed existing target
 
-The version and overwrite behavior can be supplied with flags for a non-interactive run:
+The version, identity, and overwrite behavior can be supplied with flags for a non-interactive run:
 
 ```sh
-janitor init --janitor-version latest --force
+janitor init --janitor-version latest --identity github-actions --force
 ```
 
-| Flag                                 | Description                                                     |
-| ------------------------------------ | --------------------------------------------------------------- |
-| `--janitor-version <version-or-tag>` | Select the Janitor npm version or tag embedded in the workflow. |
-| `--force`                            | Replace changed generated files without confirmation.           |
+| Flag                                 | Description                                                        |
+| ------------------------------------ | ------------------------------------------------------------------ |
+| `--janitor-version <version-or-tag>` | Select the Janitor npm version or tag embedded in the workflow.    |
+| `--identity <identity>`              | Select `github-actions` or `github-app` as the reviewing identity. |
+| `--force`                            | Replace changed generated files without confirmation.              |
 
 Initialization generates:
 
@@ -86,6 +88,23 @@ Configure all three values as **GitHub Actions secrets** in the repository:
 Optionally configure `JANITOR_VERBOSE` as a **GitHub Actions repository variable** with the value `1` to enable detailed review logs in the generated workflow.
 
 The generated pull-request workflow grants only `contents: read` and `pull-requests: write`. It uses `GITHUB_TOKEN` to update the pull request and post PR-level and diff comments. The workflow intentionally skips pull requests from forks because repository secrets and write access are unavailable to those runs. Runs are grouped by pull request and a newer event cancels an obsolete in-progress review.
+
+#### Using a GitHub App identity
+
+By default, reviews are posted by `github-actions[bot]` using the workflow's `GITHUB_TOKEN`. To post them under your own GitHub App's name and avatar, generate the workflow with:
+
+```sh
+janitor init --identity github-app
+```
+
+The generated workflow then uses [`actions/create-github-app-token`](https://github.com/actions/create-github-app-token) to mint a short-lived installation token, scoped to the current repository with only `contents: read` and `pull-requests: write`, and passes it to Janitor as `GITHUB_TOKEN`. To set it up:
+
+1. [Create a GitHub App](https://docs.github.com/en/apps/creating-github-apps/registering-a-github-app/registering-a-github-app) with the **Contents: Read-only** and **Pull requests: Read and write** repository permissions. It does not need a webhook.
+2. Generate a private key for the app and install the app on the repository.
+3. Configure the app's Client ID as the **GitHub Actions repository variable** `JANITOR_APP_CLIENT_ID`.
+4. Configure the private key as the **GitHub Actions secret** `JANITOR_APP_PRIVATE_KEY`.
+
+The provider secrets above are still required. Because Janitor edits its existing comments on every rerun, switch identities between pull requests rather than in the middle of one. A new identity cannot edit comments posted by the previous one.
 
 The selected `version` is rendered into the workflow when it is generated. Editing `version` in `janitor.toml` does not update an existing workflow; regenerate the workflow after changing it. A dedicated update command is planned but is not currently available.
 

@@ -14,16 +14,19 @@ const temporaryDirectories: string[] = [];
 
 const completeOptions: InitOptions = {
   force: false,
+  githubIdentity: "github-actions",
   janitorVersion: "latest",
 };
 
 function createPrompts(overrides: Partial<InitPromptBoundary> = {}): InitPromptBoundary & {
   confirmOverwrite: ReturnType<typeof vi.fn<InitPromptBoundary["confirmOverwrite"]>>;
+  getGitHubIdentity: ReturnType<typeof vi.fn<InitPromptBoundary["getGitHubIdentity"]>>;
   getJanitorVersion: ReturnType<typeof vi.fn<InitPromptBoundary["getJanitorVersion"]>>;
   reportCancellation: ReturnType<typeof vi.fn<InitPromptBoundary["reportCancellation"]>>;
 } {
   return {
     confirmOverwrite: vi.fn(overrides.confirmOverwrite ?? (async () => true)),
+    getGitHubIdentity: vi.fn(overrides.getGitHubIdentity ?? (async () => "github-actions")),
     getJanitorVersion: vi.fn(overrides.getJanitorVersion ?? (async () => "latest")),
     reportCancellation: vi.fn(overrides.reportCancellation ?? (() => undefined)),
   };
@@ -61,6 +64,7 @@ afterEach(async () => {
 describe("init template rendering", () => {
   it("renders TOML-safe strings and preserves GitHub expressions", async () => {
     const rendered = await renderInitFiles({
+      github_app: false,
       janitor_package: "@matfire/janitor@next",
       janitor_version: "next",
       tracked_paths: ["src/**", 'a/quoted-"path"/**', "line\nbreak/**", "windows\\path/**"],
@@ -100,7 +104,34 @@ tracked_paths = [
     expect(rendered.workflow).toContain(
       "JANITOR_PROVIDER_KEY: ${{ secrets.JANITOR_PROVIDER_KEY }}",
     );
+    expect(rendered.workflow).not.toContain("create-github-app-token");
     expect(rendered.workflow).not.toContain("{= janitor_package");
+  });
+
+  it("renders a workflow that authenticates as a GitHub App", async () => {
+    const rendered = await renderInitFiles({
+      github_app: true,
+      janitor_package: "@matfire/janitor@latest",
+      janitor_version: "latest",
+      tracked_paths: ["**"],
+    });
+
+    expect(rendered.workflow).toContain(`      - name: Create GitHub App token
+        id: app-token
+        uses: actions/create-github-app-token@v3
+        with:
+          client-id: \${{ vars.JANITOR_APP_CLIENT_ID }}
+          private-key: \${{ secrets.JANITOR_APP_PRIVATE_KEY }}
+          repositories: \${{ github.event.repository.name }}
+          permission-contents: read
+          permission-pull-requests: write
+      - name: Set up Node.js
+`);
+    expect(rendered.workflow).toContain(`        env:
+          GITHUB_TOKEN: \${{ steps.app-token.outputs.token }}
+          JANITOR_VERBOSE: \${{ vars.JANITOR_VERBOSE }}
+`);
+    expect(rendered.workflow).not.toContain("secrets.GITHUB_TOKEN");
   });
 
   it("fails when a strict template variable is missing", async () => {
@@ -108,6 +139,7 @@ tracked_paths = [
       renderInitFiles({
         janitor_version: "latest",
         tracked_paths: ["**"],
+        github_app: false,
       } as never),
     ).rejects.toThrow(/janitor_package/u);
   });
@@ -145,25 +177,57 @@ describe("init filesystem behavior", () => {
     const cwd = await createTemporaryDirectory();
     const prompts = createPrompts({ getJanitorVersion: async () => "next" });
 
-    await init({ force: false, janitorVersion: undefined }, { cwd, prompts });
+    await init(
+      { force: false, githubIdentity: "github-actions", janitorVersion: undefined },
+      { cwd, prompts },
+    );
 
     expect(prompts.getJanitorVersion).toHaveBeenCalledOnce();
     expect(await readTarget(cwd, "janitor.toml")).toContain('version = "next"');
     expect(await readTarget(cwd, "janitor.toml")).toContain('  "**"');
   });
 
-  it("writes nothing when an input prompt is cancelled", async () => {
+  it("collects an omitted GitHub identity from prompts", async () => {
     const cwd = await createTemporaryDirectory();
-    const prompts = createPrompts({ getJanitorVersion: async () => undefined });
+    const prompts = createPrompts({ getGitHubIdentity: async () => "github-app" });
 
-    const result = await init({ force: false, janitorVersion: undefined }, { cwd, prompts });
+    await init({ ...completeOptions, githubIdentity: undefined }, { cwd, prompts });
 
-    expect(result).toEqual({ cancelled: true, targets: [] });
-    expect(prompts.reportCancellation).toHaveBeenCalledOnce();
-    expect(prompts.getJanitorVersion).toHaveBeenCalledOnce();
-    await expectTargetNotToExist(cwd, "janitor.toml");
-    await expectTargetNotToExist(cwd, ".github/workflows/janitor.yml");
+    expect(prompts.getGitHubIdentity).toHaveBeenCalledOnce();
+    expect(await readTarget(cwd, ".github/workflows/janitor.yml")).toContain(
+      "GITHUB_TOKEN: ${{ steps.app-token.outputs.token }}",
+    );
   });
+
+  it("does not prompt for a GitHub identity supplied as an option", async () => {
+    const cwd = await createTemporaryDirectory();
+    const prompts = createPrompts();
+
+    await init(completeOptions, { cwd, prompts });
+
+    expect(prompts.getGitHubIdentity).not.toHaveBeenCalled();
+    expect(await readTarget(cwd, ".github/workflows/janitor.yml")).toContain(
+      "GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}",
+    );
+  });
+
+  it.each([
+    ["version", { janitorVersion: undefined }, { getJanitorVersion: async () => undefined }],
+    ["identity", { githubIdentity: undefined }, { getGitHubIdentity: async () => undefined }],
+  ] satisfies Array<[string, Partial<InitOptions>, Partial<InitPromptBoundary>]>)(
+    "writes nothing when the %s prompt is cancelled",
+    async (_name, options, overrides) => {
+      const cwd = await createTemporaryDirectory();
+      const prompts = createPrompts(overrides);
+
+      const result = await init({ ...completeOptions, ...options }, { cwd, prompts });
+
+      expect(result).toEqual({ cancelled: true, targets: [] });
+      expect(prompts.reportCancellation).toHaveBeenCalledOnce();
+      await expectTargetNotToExist(cwd, "janitor.toml");
+      await expectTargetNotToExist(cwd, ".github/workflows/janitor.yml");
+    },
+  );
 
   it("leaves byte-identical targets unchanged without prompting", async () => {
     const cwd = await createTemporaryDirectory();

@@ -1,10 +1,12 @@
 import { mkdir, readFile, writeFile } from "node:fs/promises";
 import { dirname, join } from "node:path";
-import { cancel, confirm, isCancel, text } from "@clack/prompts";
+import { cancel, confirm, isCancel, select, text } from "@clack/prompts";
 import { cli, type CliOptions } from "cleye";
 import { Liquid } from "liquidjs";
 
 const DEFAULT_JANITOR_VERSION = "latest";
+const DEFAULT_GITHUB_IDENTITY: GitHubIdentity = "github-actions";
+const GITHUB_IDENTITIES = ["github-actions", "github-app"] as const;
 const DEFAULT_TRACKED_PATHS = ["**"];
 const VERSION_OR_TAG_PATTERN = /^[0-9A-Za-z][0-9A-Za-z._-]*$/;
 
@@ -13,12 +15,16 @@ const templateUrls = {
   workflow: new URL("./templates/janitor.yml.liquid", import.meta.url),
 };
 
+export type GitHubIdentity = (typeof GITHUB_IDENTITIES)[number];
+
 export interface InitOptions {
   force: boolean;
+  githubIdentity: GitHubIdentity | undefined;
   janitorVersion: string | undefined;
 }
 
 export interface InitTemplateContext {
+  github_app: boolean;
   janitor_package: string;
   janitor_version: string;
   tracked_paths: string[];
@@ -43,6 +49,7 @@ export interface InitResult {
 
 export interface InitPromptBoundary {
   confirmOverwrite(path: string): Promise<boolean | undefined>;
+  getGitHubIdentity(): Promise<GitHubIdentity | undefined>;
   getJanitorVersion(): Promise<string | undefined>;
   reportCancellation(): void;
 }
@@ -76,6 +83,18 @@ function JanitorVersion(value: string): string {
   return version;
 }
 
+function isGitHubIdentity(value: string): value is GitHubIdentity {
+  return (GITHUB_IDENTITIES as readonly string[]).includes(value);
+}
+
+function GitHubIdentityFlag(value: string): GitHubIdentity {
+  const identity = value.trim();
+  if (!isGitHubIdentity(identity)) {
+    throw new Error(`Use one of: ${GITHUB_IDENTITIES.join(", ")}.`);
+  }
+  return identity;
+}
+
 export const initCliOptions = {
   help: {
     description: "Initialize Janitor in the current project",
@@ -85,6 +104,12 @@ export const initCliOptions = {
       type: JanitorVersion,
       description: "Janitor npm version or tag for the workflow (default: latest)",
       placeholder: "<version-or-tag>",
+    },
+    identity: {
+      type: GitHubIdentityFlag,
+      description:
+        "GitHub identity that posts reviews: github-actions or github-app (default: github-actions)",
+      placeholder: "<identity>",
     },
     force: {
       type: Boolean,
@@ -102,6 +127,21 @@ const defaultPrompts: InitPromptBoundary = {
       validate: validateVersionOrTag,
     });
     return isCancel(value) ? undefined : value.trim();
+  },
+  async getGitHubIdentity() {
+    const value = await select<GitHubIdentity>({
+      message: "Which GitHub identity should post reviews?",
+      initialValue: DEFAULT_GITHUB_IDENTITY,
+      options: [
+        { value: "github-actions", label: "GitHub Actions bot", hint: "uses GITHUB_TOKEN" },
+        {
+          value: "github-app",
+          label: "GitHub App",
+          hint: "uses an installation token for your own app",
+        },
+      ],
+    });
+    return isCancel(value) ? undefined : value;
   },
   async confirmOverwrite(path) {
     const value = await confirm({
@@ -195,6 +235,7 @@ interface PendingTarget {
 export async function init(
   options: InitOptions = {
     force: false,
+    githubIdentity: undefined,
     janitorVersion: undefined,
   },
   dependencies: InitDependencies = {},
@@ -206,11 +247,17 @@ export async function init(
     return { cancelled: true, targets: [] };
   }
   const janitorVersion = JanitorVersion(selectedJanitorVersion);
+  const githubIdentity = options.githubIdentity ?? (await prompts.getGitHubIdentity());
+  if (githubIdentity === undefined) {
+    prompts.reportCancellation();
+    return { cancelled: true, targets: [] };
+  }
 
   const cwd = dependencies.cwd ?? process.cwd();
   const fileSystem = dependencies.fileSystem ?? defaultFileSystem;
   const rendered = await renderInitFiles(
     {
+      github_app: githubIdentity === "github-app",
       janitor_package: `@matfire/janitor@${janitorVersion}`,
       janitor_version: janitorVersion,
       tracked_paths: DEFAULT_TRACKED_PATHS,
@@ -276,6 +323,7 @@ export function runInitCommand(action: InitAction = init, argv?: string[]) {
     ({ flags }) =>
       action({
         force: flags.force ?? false,
+        githubIdentity: flags.identity,
         janitorVersion: flags.janitorVersion,
       }),
     argv,
