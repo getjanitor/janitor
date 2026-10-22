@@ -87,7 +87,9 @@ tracked_paths = [
 ]
 `);
     expect(rendered.workflow).toContain('run: npx --yes "@matfire/janitor@next" review');
-    expect(rendered.workflow).toContain("contents: read");
+    // GitHub rejects resolveReviewThread from integration tokens without contents: write.
+    expect(rendered.workflow).toContain("contents: write");
+    expect(rendered.workflow).not.toContain("contents: read");
     expect(rendered.workflow).toContain("pull-requests: write");
     expect(rendered.workflow).not.toContain("issues: write");
     expect(rendered.workflow).toContain("group: janitor-${{ github.event.pull_request.number }}");
@@ -123,7 +125,7 @@ tracked_paths = [
           client-id: \${{ vars.JANITOR_APP_CLIENT_ID }}
           private-key: \${{ secrets.JANITOR_APP_PRIVATE_KEY }}
           repositories: \${{ github.event.repository.name }}
-          permission-contents: read
+          permission-contents: write
           permission-pull-requests: write
       - name: Set up Node.js
 `);

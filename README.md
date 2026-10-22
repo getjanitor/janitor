@@ -87,7 +87,7 @@ Configure all three values as **GitHub Actions secrets** in the repository:
 
 Optionally configure `JANITOR_VERBOSE` as a **GitHub Actions repository variable** with the value `1` to enable detailed review logs in the generated workflow.
 
-The generated pull-request workflow grants only `contents: read` and `pull-requests: write`. It uses `GITHUB_TOKEN` to update the pull request and post PR-level and diff comments. The workflow intentionally skips pull requests from forks because repository secrets and write access are unavailable to those runs. Runs are grouped by pull request and a newer event cancels an obsolete in-progress review.
+The generated pull-request workflow grants only `contents: write` and `pull-requests: write`. It uses `GITHUB_TOKEN` to update the pull request, post PR-level and diff comments, and resolve review threads for findings that have been fixed. GitHub rejects the `resolveReviewThread` mutation from integration tokens that lack `contents: write`, even though Janitor never pushes to the repository. Because that token can write repository contents and is handed to the Janitor package that `npx` downloads, pin an exact Janitor version instead of a floating tag such as `latest` if you want to limit exposure to a compromised release. The workflow intentionally skips pull requests from forks because repository secrets and write access are unavailable to those runs. Runs are grouped by pull request and a newer event cancels an obsolete in-progress review.
 
 #### Using a GitHub App identity
 
@@ -97,9 +97,9 @@ By default, reviews are posted by `github-actions[bot]` using the workflow's `GI
 janitor init --identity github-app
 ```
 
-The generated workflow then uses [`actions/create-github-app-token`](https://github.com/actions/create-github-app-token) to mint a short-lived installation token, scoped to the current repository with only `contents: read` and `pull-requests: write`, and passes it to Janitor as `GITHUB_TOKEN`. To set it up:
+The generated workflow then uses [`actions/create-github-app-token`](https://github.com/actions/create-github-app-token) to mint a short-lived installation token, scoped to the current repository with only `contents: write` and `pull-requests: write`, and passes it to Janitor as `GITHUB_TOKEN`. To set it up:
 
-1. [Create a GitHub App](https://docs.github.com/en/apps/creating-github-apps/registering-a-github-app/registering-a-github-app) with the **Contents: Read-only** and **Pull requests: Read and write** repository permissions. It does not need a webhook.
+1. [Create a GitHub App](https://docs.github.com/en/apps/creating-github-apps/registering-a-github-app/registering-a-github-app) with the **Contents: Read and write** and **Pull requests: Read and write** repository permissions. It does not need a webhook.
 2. Generate a private key for the app and install the app on the repository.
 3. Configure the app's Client ID as the **GitHub Actions repository variable** `JANITOR_APP_CLIENT_ID`.
 4. Configure the private key as the **GitHub Actions secret** `JANITOR_APP_PRIVATE_KEY`.
