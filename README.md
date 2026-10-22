@@ -87,7 +87,7 @@ Configure all three values as **GitHub Actions secrets** in the repository:
 
 Optionally configure `JANITOR_VERBOSE` as a **GitHub Actions repository variable** with the value `1` to enable detailed review logs in the generated workflow.
 
-The generated pull-request workflow grants only `contents: write` and `pull-requests: write`. It uses `GITHUB_TOKEN` to update the pull request, post PR-level and diff comments, and resolve review threads for findings that have been fixed. GitHub rejects the `resolveReviewThread` mutation from integration tokens that lack `contents: write`, even though Janitor never pushes to the repository. The workflow intentionally skips pull requests from forks because repository secrets and write access are unavailable to those runs. Runs are grouped by pull request and a newer event cancels an obsolete in-progress review.
+The generated pull-request workflow grants only `contents: write` and `pull-requests: write`. It uses `GITHUB_TOKEN` to update the pull request, post PR-level and diff comments, and resolve review threads for findings that have been fixed. GitHub rejects the `resolveReviewThread` mutation from integration tokens that lack `contents: write`, even though Janitor never pushes to the repository. Because that token can write repository contents and is handed to the Janitor package that `npx` downloads, pin an exact Janitor version instead of a floating tag such as `latest` if you want to limit exposure to a compromised release. The workflow intentionally skips pull requests from forks because repository secrets and write access are unavailable to those runs. Runs are grouped by pull request and a newer event cancels an obsolete in-progress review.
 
 #### Using a GitHub App identity
 
