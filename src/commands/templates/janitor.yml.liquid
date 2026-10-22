@@ -6,7 +6,7 @@ on:
     types: [opened, synchronize, reopened, ready_for_review]
 
 permissions:
-  contents: read
+  contents: write
   pull-requests: write
 
 concurrency:
@@ -33,7 +33,7 @@ jobs:
           client-id: ${{ vars.JANITOR_APP_CLIENT_ID }}
           private-key: ${{ secrets.JANITOR_APP_PRIVATE_KEY }}
           repositories: ${{ github.event.repository.name }}
-          permission-contents: read
+          permission-contents: write
           permission-pull-requests: write
 {% endif %}      - name: Set up Node.js
         uses: actions/setup-node@v7
