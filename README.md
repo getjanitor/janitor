@@ -87,7 +87,7 @@ Configure all three values as **GitHub Actions secrets** in the repository:
 
 Optionally configure `JANITOR_VERBOSE` as a **GitHub Actions repository variable** with the value `1` to enable detailed review logs in the generated workflow.
 
-The generated pull-request workflow grants only `contents: write` and `pull-requests: write`. It uses `GITHUB_TOKEN` to update the pull request, post PR-level and diff comments, and resolve review threads for findings that have been fixed. GitHub rejects the `resolveReviewThread` mutation from integration tokens that lack `contents: write`, even though Janitor never pushes to the repository. Because that token can write repository contents and is handed to the Janitor package that `npx` downloads, pin an exact Janitor version instead of a floating tag such as `latest` if you want to limit exposure to a compromised release. The workflow intentionally skips pull requests from forks because repository secrets and write access are unavailable to those runs. Runs are grouped by pull request and a newer event cancels an obsolete in-progress review.
+The generated pull-request workflow grants only `contents: write` and `pull-requests: write`. It uses `GITHUB_TOKEN` to post PR-level and diff comments, and resolve review threads for findings that have been fixed. GitHub rejects the `resolveReviewThread` mutation from integration tokens that lack `contents: write`, even though Janitor never pushes to the repository. Because that token can write repository contents and is handed to the Janitor package that `npx` downloads, pin an exact Janitor version instead of a floating tag such as `latest` if you want to limit exposure to a compromised release. The workflow intentionally skips pull requests from forks because repository secrets and write access are unavailable to those runs. Runs are grouped by pull request and a newer event cancels an obsolete in-progress review.
 
 #### Using a GitHub App identity
 
@@ -129,8 +129,6 @@ tracked_paths = ["**"]
 ```
 
 The ledger includes successful and failed agent runs, while path-filtered skips are omitted. Input totals include uncached input plus cache-read and cache-write prompt tokens; output totals include reasoning tokens when the provider reports them. Costs are estimates from the agent library's model catalog, and models without available pricing display `—`. Janitor retains the newest 50 runs, dropping additional oldest entries when necessary to stay within GitHub's comment limit.
-
-Janitor appends a marked status block to the pull request description while preserving its author-written content. The status shows when a review is running, completed, skipped, or failed. A completed 5/5-confidence review uses a thumbs-up indicator; other successful reviews use a checkmark.
 
 Detailed Actions logging is disabled by default. Enable it in the generated workflow by setting the optional GitHub Actions repository variable `JANITOR_VERBOSE` to `1`. When invoking the command directly, use either `janitor review --verbose` or `JANITOR_VERBOSE=1`. Verbose output reports review setup, diff collection, previous-feedback loading, validation, publication, and concise agent activity. Tool starts/results, retries, and context compaction are visible, but model narration and raw tool results are not emitted.
 

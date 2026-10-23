@@ -14,13 +14,10 @@ import { collectReviewDiff, parseCommentableLines, parseNameStatus } from "#/rev
 import {
   FINDING_MARKER,
   GENERAL_REVIEW_MARKER,
-  REVIEW_STATUS_MARKER,
   findJanitorGeneralComment,
   findOpenJanitorFindings,
-  reconcileReviewDescription,
   renderGeneralComment,
   renderGeneralCommentStatus,
-  renderReviewDescriptionStatus,
 } from "#/review/markers";
 import { requireValidModelText } from "#/review/model_result";
 import { executeReview } from "#/review/orchestrator";
@@ -85,16 +82,10 @@ function githubBoundary(
     previous?: boolean;
     general?: boolean;
     generalBody?: string;
-    body?: string;
   } = {},
 ): GitHubReviewBoundary & Record<string, ReturnType<typeof vi.fn>> {
   const previous = options.previous ?? false;
-  let body = options.body ?? "Pull request description";
   return {
-    getPullRequestBody: vi.fn(async () => body),
-    updatePullRequestBody: vi.fn(async (updated: string) => {
-      body = updated;
-    }),
     listGeneralComments: vi.fn(async () =>
       options.general
         ? [
@@ -452,7 +443,6 @@ describe("Janitor markers and prompt", () => {
           outputTokens: 2,
         }),
       ]),
-      renderReviewDescriptionStatus("head-sha", "running"),
     ];
 
     for (const marker of markers) {
@@ -460,39 +450,6 @@ describe("Janitor markers and prompt", () => {
         /reserved Janitor marker/u,
       );
     }
-  });
-
-  it("renders and reconciles a single head-aware status block", () => {
-    const running = renderReviewDescriptionStatus("head-sha", "running");
-    expect(running).toContain(REVIEW_STATUS_MARKER);
-    expect(running).toContain("head=head-sha");
-    expect(running).toContain("👀 Janitor review in progress");
-
-    const emptyBody = reconcileReviewDescription("", "head-sha", "running");
-    expect(emptyBody).toBe(running);
-
-    const original = "Title\n\nAuthor-written details.\n\n\n";
-    const withRunning = reconcileReviewDescription(original, "head-sha", "running");
-    const complete = reconcileReviewDescription(withRunning, "head-sha", "complete");
-    expect(withRunning.startsWith(original)).toBe(true);
-    expect(complete.startsWith(original)).toBe(true);
-    expect(complete).toContain("✅ Janitor review complete");
-    expect(complete.match(new RegExp(REVIEW_STATUS_MARKER, "gu"))).toHaveLength(2);
-  });
-
-  it("removes duplicate old status blocks and rejects stale terminal transitions", () => {
-    const authorBody = "Author content";
-    const duplicateBody = `${authorBody}\n\n${renderReviewDescriptionStatus("old-1", "failed")}\n\n${renderReviewDescriptionStatus("old-2", "running")}`;
-    const current = reconcileReviewDescription(duplicateBody, "new-head", "running");
-    expect(current).toContain(authorBody);
-    expect(current).not.toContain("old-1");
-    expect(current).not.toContain("old-2");
-    expect(current.match(new RegExp(REVIEW_STATUS_MARKER, "gu"))).toHaveLength(2);
-
-    expect(reconcileReviewDescription(current, "old-head", "complete")).toBe(current);
-    expect(reconcileReviewDescription(current, "new-head", "skipped")).toContain(
-      "⏭️ Janitor review skipped — no tracked paths changed",
-    );
   });
 
   it("renders one marked general comment with diagram and confidence", () => {
@@ -869,12 +826,6 @@ describe("review reconciliation", () => {
       10,
       expect.stringContaining("**Incorrect replacement** [►](https://github.com/c/1)"),
     );
-    expect(github.getPullRequestBody).toHaveBeenCalledTimes(2);
-    expect(github.updatePullRequestBody).toHaveBeenCalledTimes(2);
-    expect(github.updatePullRequestBody.mock.calls[0]?.[0]).toContain(
-      "👀 Janitor review in progress",
-    );
-    expect(github.updatePullRequestBody.mock.calls[1]?.[0]).toContain("✅ Janitor review complete");
   });
 
   it("folds findings outside the diff into the general comment instead of failing", async () => {
@@ -931,7 +882,6 @@ describe("review reconciliation", () => {
     expect(generalBody).toContain(
       "2. ![medium](https://img.shields.io/badge/medium-yellow) **Unchanged caller breaks**\n",
     );
-    expect(github.updatePullRequestBody.mock.calls[1]?.[0]).toContain("✅ Janitor review complete");
   });
 
   it("folds a finding into the general comment when GitHub rejects its inline location", async () => {
@@ -1061,7 +1011,6 @@ describe("review reconciliation", () => {
     expect(
       messages.filter((message) => message.startsWith("Finding outside the diff omitted")),
     ).toHaveLength(2);
-    expect(github.updatePullRequestBody.mock.calls[1]?.[0]).toContain("✅ Janitor review complete");
   });
 
   it("rejects near-limit general content before publishing when fallbacks could overflow", async () => {
@@ -1096,91 +1045,6 @@ describe("review reconciliation", () => {
       ),
     ).rejects.toThrow(/comment size limit/u);
     expect(github.createInlineComment).not.toHaveBeenCalled();
-  });
-
-  it("continues the review when the running status cannot be published", async () => {
-    const github = githubBoundary();
-    github.getPullRequestBody.mockRejectedValueOnce(new Error("status unavailable"));
-    const reviewAgent = agent({ findings: [], dispositions: [], general: cleanGeneral });
-    const messages: string[] = [];
-
-    const result = await executeReview({
-      cwd: "/repo",
-      context,
-      git: reviewGit(),
-      github,
-      agent: reviewAgent,
-      configLoader: async () => ({ trackedPaths: ["src/**"], trackSpend: false }),
-      report: (message) => messages.push(message),
-    });
-
-    expect(result).toEqual({ skipped: false, newFindings: 0, stillOpen: 0, fixed: 0 });
-    expect(reviewAgent.run).toHaveBeenCalledOnce();
-    expect(github.createGeneralComment).toHaveBeenCalledOnce();
-    expect(github.updatePullRequestBody).toHaveBeenCalledOnce();
-    expect(messages).toContain("Unable to publish pull request running status: status unavailable");
-  });
-
-  it("uses the maximum-confidence completion status for a 5/5 review", async () => {
-    const github = githubBoundary({ body: "Author content" });
-    await execute(
-      {
-        findings: [],
-        dispositions: [],
-        general: { ...cleanGeneral, confidence: 5 },
-      },
-      github,
-    );
-
-    expect(github.updatePullRequestBody.mock.calls[1]?.[0]).toContain(
-      "👍 Janitor review complete — confidence 5/5",
-    );
-    expect(github.updatePullRequestBody.mock.calls[1]?.[0]).toContain("Author content");
-  });
-
-  it("keeps a published review successful when the completion status fails", async () => {
-    const github = githubBoundary({ body: "Author content" });
-    const runningBody = reconcileReviewDescription("Author content", context.headSha, "running");
-    github.getPullRequestBody
-      .mockResolvedValueOnce("Author content")
-      .mockResolvedValueOnce(runningBody);
-    github.updatePullRequestBody
-      .mockResolvedValueOnce(undefined)
-      .mockRejectedValueOnce(new Error("status unavailable"));
-    const messages: string[] = [];
-
-    const result = await executeReview({
-      cwd: "/repo",
-      context,
-      git: reviewGit(),
-      github,
-      agent: agent({
-        findings: [
-          {
-            title: "Incorrect replacement",
-            body: "This changes the behavior unexpectedly.",
-            severity: "high",
-            path: "src/a.ts",
-            side: "RIGHT",
-            line: 2,
-          },
-        ],
-        dispositions: [],
-        general: cleanGeneral,
-      }),
-      configLoader: async () => ({ trackedPaths: ["src/**"], trackSpend: false }),
-      report: (message) => messages.push(message),
-    });
-
-    expect(result).toEqual({ skipped: false, newFindings: 1, stillOpen: 0, fixed: 0 });
-    expect(github.createInlineComment).toHaveBeenCalledOnce();
-    expect(github.createGeneralComment).toHaveBeenCalledOnce();
-    expect(github.getPullRequestBody).toHaveBeenCalledTimes(2);
-    expect(github.updatePullRequestBody).toHaveBeenCalledTimes(2);
-    expect(messages).toContain(
-      "Unable to publish pull request complete status: status unavailable",
-    );
-    expect(messages).not.toContain("Pull request status set to failed.");
   });
 
   it("leaves a reproduced thread open without posting a duplicate", async () => {
@@ -1252,7 +1116,6 @@ describe("review reconciliation", () => {
     expect(messages).toContain(
       "Unable to resolve fixed thread thread-1: Resource not accessible by integration; it was left open.",
     );
-    expect(github.updatePullRequestBody.mock.calls[1]?.[0]).toContain("✅ Janitor review complete");
   });
 
   it("updates the early general comment when the review fails", async () => {
@@ -1277,7 +1140,6 @@ describe("review reconciliation", () => {
       10,
       expect.stringContaining("Review failed"),
     );
-    expect(github.updatePullRequestBody.mock.calls[1]?.[0]).toContain("❌ Janitor review failed");
   });
 
   it("does not publish inline or thread mutations for invalid model output", async () => {
@@ -1310,7 +1172,6 @@ describe("review reconciliation", () => {
       10,
       expect.stringContaining("Review failed"),
     );
-    expect(github.updatePullRequestBody.mock.calls[1]?.[0]).toContain("❌ Janitor review failed");
   });
 
   it("rejects reserved markers before any review comment or thread mutation", async () => {
@@ -1349,7 +1210,6 @@ describe("review reconciliation", () => {
       9,
       expect.stringContaining("Review failed"),
     );
-    expect(github.updatePullRequestBody.mock.calls[1]?.[0]).toContain("❌ Janitor review failed");
   });
 
   it("skips before GitHub feedback or model access when tracked paths do not match", async () => {
@@ -1366,34 +1226,6 @@ describe("review reconciliation", () => {
     expect(result.skipped).toBe(true);
     expect(github.listGeneralComments).not.toHaveBeenCalled();
     expect(reviewAgent.run).not.toHaveBeenCalled();
-    expect(github.getPullRequestBody).toHaveBeenCalledTimes(2);
-    expect(github.updatePullRequestBody.mock.calls[1]?.[0]).toContain(
-      "⏭️ Janitor review skipped — no tracked paths changed",
-    );
-  });
-
-  it("returns skipped when the skipped status cannot be published", async () => {
-    const github = githubBoundary();
-    github.updatePullRequestBody
-      .mockResolvedValueOnce(undefined)
-      .mockRejectedValueOnce(new Error("status unavailable"));
-    const reviewAgent = agent({ findings: [], dispositions: [], general: cleanGeneral });
-    const messages: string[] = [];
-
-    const result = await executeReview({
-      cwd: "/repo",
-      context,
-      git: reviewGit("docs/a.md"),
-      github,
-      agent: reviewAgent,
-      configLoader: async () => ({ trackedPaths: ["src/**"], trackSpend: true }),
-      report: (message) => messages.push(message),
-    });
-
-    expect(result).toEqual({ skipped: true, newFindings: 0, stillOpen: 0, fixed: 0 });
-    expect(reviewAgent.run).not.toHaveBeenCalled();
-    expect(github.updatePullRequestBody).toHaveBeenCalledTimes(2);
-    expect(messages).toContain("Unable to publish pull request skipped status: status unavailable");
   });
 
   it("reports lifecycle progress in order", async () => {
@@ -1422,45 +1254,6 @@ describe("review reconciliation", () => {
     );
     expect(messages.indexOf("Agent output validated successfully.")).toBeLessThan(
       messages.indexOf("Publishing validated review feedback to GitHub."),
-    );
-  });
-
-  it("keeps the original review error when failed-status publication also fails", async () => {
-    const github = githubBoundary();
-    github.updatePullRequestBody
-      .mockResolvedValueOnce(undefined)
-      .mockRejectedValueOnce(new Error("status update failed"));
-    const original = new Error("agent failed");
-    const failingAgent: ReviewAgentBoundary = { run: vi.fn(async () => Promise.reject(original)) };
-    const messages: string[] = [];
-
-    await expect(
-      executeReview({
-        cwd: "/repo",
-        context,
-        git: reviewGit(),
-        github,
-        agent: failingAgent,
-        configLoader: async () => ({ trackedPaths: ["src/**"], trackSpend: false }),
-        report: (message) => messages.push(message),
-      }),
-    ).rejects.toBe(original);
-    expect(messages).toContain(
-      "Unable to publish pull request failed status: status update failed",
-    );
-  });
-
-  it("does not replace a newer head's running status with a stale completion", async () => {
-    const github = githubBoundary({ body: "Author content" });
-    github.getPullRequestBody
-      .mockResolvedValueOnce("Author content")
-      .mockResolvedValueOnce(reconcileReviewDescription("Author content", "newer-head", "running"));
-
-    await execute({ findings: [], dispositions: [], general: cleanGeneral }, github);
-
-    expect(github.updatePullRequestBody).toHaveBeenCalledTimes(1);
-    expect(github.updatePullRequestBody.mock.calls[0]?.[0]).toContain(
-      "👀 Janitor review in progress",
     );
   });
 });
