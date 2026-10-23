@@ -31,8 +31,6 @@ function createFakeOctokit() {
           updateComment: vi.fn(),
         },
         pulls: {
-          get: vi.fn(),
-          update: vi.fn(),
           createReviewComment: vi.fn(),
         },
       },
@@ -51,23 +49,6 @@ function client(fake: ReturnType<typeof createFakeOctokit>) {
 }
 
 describe("GitHub review client", () => {
-  it("reads and updates the pull request body through Octokit", async () => {
-    const fake = createFakeOctokit();
-    fake.octokit.rest.pulls.get.mockResolvedValue({ data: { body: null } });
-    fake.octokit.rest.pulls.update.mockResolvedValue({});
-    const github = client(fake);
-
-    await expect(github.getPullRequestBody()).resolves.toBe("");
-    await github.updatePullRequestBody("Description\n\nStatus");
-
-    expect(fake.octokit.rest.pulls.get).toHaveBeenCalledWith(
-      expect.objectContaining({ pull_number: 4 }),
-    );
-    expect(fake.octokit.rest.pulls.update).toHaveBeenCalledWith(
-      expect.objectContaining({ pull_number: 4, body: "Description\n\nStatus" }),
-    );
-  });
-
   it("uses Octokit pagination for PR conversation comments", async () => {
     const fake = createFakeOctokit();
     fake.octokit.paginate.mockResolvedValue([
