@@ -1,3 +1,25 @@
+## [2.1.0] - 2026-10-23
+
+### 🚀 Features
+
+- Support posting reviews as a GitHub App
+- List findings with severity badges and links in the general comment
+
+### 🐛 Bug Fixes
+
+- Fold findings outside the diff into the general comment
+- Never overflow the general comment with 422-folded findings
+- Keep the review when a fixed thread cannot be resolved
+- Size-check the worst-case general comment before publishing
+- Grant contents: write so Janitor can resolve fixed threads
+
+### 📚 Documentation
+
+- Note the contents: write exposure of floating Janitor tags
+
+### ⚙️ Miscellaneous Tasks
+
+- Revert unrelated CHANGELOG formatting
 ## [2.0.1] - 2026-10-21
 
 ### ⚙️ Miscellaneous Tasks
