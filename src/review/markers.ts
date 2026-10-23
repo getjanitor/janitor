@@ -84,6 +84,39 @@ export function renderGeneralCommentStatus(
   return `${GENERAL_REVIEW_MARKER}\n## Janitor review\n\n${message}\n${renderSpendHistory(spendHistory ?? [])}`;
 }
 
+function findingLocation(finding: NewFinding): string {
+  return `\`${finding.path}\` line ${finding.line} (${finding.side})`;
+}
+
+// GitHub only accepts inline review comments on lines that are part of the
+// pull-request diff. Findings that cannot be anchored there are folded into the
+// general comment so one misplaced anchor never discards the whole review.
+export function renderOutsideDiffFindings(
+  findings: readonly NewFinding[],
+  detail: "full" | "compact" | "count" = "full",
+): string {
+  if (findings.length === 0) return "";
+  const heading = (finding: NewFinding) =>
+    `**${finding.severity.toUpperCase()}: ${finding.title}**`;
+  const content =
+    detail === "full"
+      ? findings
+          .map((finding) => `${heading(finding)}\n${findingLocation(finding)}\n\n${finding.body}`)
+          .join("\n\n")
+      : detail === "compact"
+        ? findings
+            .map((finding) => `- ${heading(finding)} — ${findingLocation(finding)}`)
+            .join("\n")
+        : `${findings.length} finding(s) were too large to list here; see the workflow logs for their titles and locations.`;
+  return `
+### Findings outside the diff
+
+These findings could not be posted as inline comments on the pull request.
+
+${content}
+`;
+}
+
 const SEVERITY_BADGE_COLOR: Record<FindingSeverity, string> = {
   critical: "critical",
   high: "orange",
@@ -101,24 +134,39 @@ function renderSeverityBadge(severity: FindingSeverity): string {
   return `![${severity}](https://img.shields.io/badge/${severity}-${SEVERITY_BADGE_COLOR[severity]})`;
 }
 
+// Titles are capped so the list stays bounded however long the model's titles
+// are; the full title lives in the linked inline comment.
+const LISTED_TITLE_LIMIT = 120;
+
+function listedTitle(title: string): string {
+  const collapsed = title.replace(/\s+/gu, " ").trim();
+  return collapsed.length <= LISTED_TITLE_LIMIT
+    ? collapsed
+    : `${collapsed.slice(0, LISTED_TITLE_LIMIT - 1).trimEnd()}…`;
+}
+
 function renderFindingsSection(
   findings: readonly GeneralCommentFinding[],
-  counts: { stillOpen: number; fixed: number },
+  counts: { stillOpen: number; fixed: number; unresolvedFixed?: number },
 ): string {
   const items = findings.map((finding, index) => {
-    const title = finding.title.replace(/\s+/gu, " ").trim();
     const link = finding.url === undefined ? "" : ` [►](${finding.url})`;
-    return `${index + 1}. ${renderSeverityBadge(finding.severity)} **${title}**${link}`;
+    return `${index + 1}. ${renderSeverityBadge(finding.severity)} **${listedTitle(finding.title)}**${link}`;
   });
   const list = items.length === 0 ? "No new findings." : items.join("\n");
-  return `${list}\n\nExisting findings still open: ${counts.stillOpen} · Fixed findings resolved: ${counts.fixed}`;
+  return `${list}
+
+- Existing findings still open: ${counts.stillOpen}
+- Fixed findings resolved: ${counts.fixed}
+${counts.unresolvedFixed ? `- Fixed findings that could not be resolved automatically: ${counts.unresolvedFixed}\n` : ""}`;
 }
 
 export function renderGeneralComment(
   general: GeneralReview,
   findings: readonly GeneralCommentFinding[],
-  counts: { stillOpen: number; fixed: number },
+  counts: { stillOpen: number; fixed: number; unresolvedFixed?: number },
   spendHistory?: readonly ReviewSpendEntry[],
+  outsideDiff = "",
 ): string {
   return `${GENERAL_REVIEW_MARKER}
 ## Janitor review
@@ -126,7 +174,7 @@ export function renderGeneralComment(
 ### Findings
 
 ${renderFindingsSection(findings, counts)}
-
+${outsideDiff}
 ### Summary
 
 ${general.summary}

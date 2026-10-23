@@ -518,8 +518,17 @@ describe("Janitor markers and prompt", () => {
     expect(body).toContain(
       "2. ![critical](https://img.shields.io/badge/critical-critical) **Unlinked**\n",
     );
-    expect(body).toContain("Existing findings still open: 2 · Fixed findings resolved: 1");
+    expect(body).toContain("- Existing findings still open: 2\n- Fixed findings resolved: 1");
     expect(body.indexOf("### Findings")).toBeLessThan(body.indexOf("### Summary"));
+  });
+
+  it("caps long finding titles in the findings list", () => {
+    const body = renderGeneralComment(cleanGeneral, [{ title: "x".repeat(500), severity: "low" }], {
+      stillOpen: 0,
+      fixed: 0,
+    });
+    expect(body).toContain(`**${"x".repeat(119)}…**`);
+    expect(body).not.toContain("x".repeat(120));
   });
 
   it("instructs the agent to map usages and explicitly disposition old threads", () => {
@@ -868,6 +877,227 @@ describe("review reconciliation", () => {
     expect(github.updatePullRequestBody.mock.calls[1]?.[0]).toContain("✅ Janitor review complete");
   });
 
+  it("folds findings outside the diff into the general comment instead of failing", async () => {
+    const github = githubBoundary();
+    const result = await execute(
+      {
+        findings: [
+          {
+            title: "Incorrect replacement",
+            body: "This changes the behavior unexpectedly.",
+            severity: "high",
+            path: "src/a.ts",
+            side: "RIGHT",
+            line: 2,
+          },
+          {
+            title: "Unchanged caller breaks",
+            body: "The caller still passes the old argument.",
+            severity: "medium",
+            path: "src/a.ts",
+            side: "RIGHT",
+            line: 99,
+          },
+          {
+            title: "Untouched file depends on old shape",
+            body: "This file was not changed but relies on the removed field.",
+            severity: "low",
+            path: "src/untouched.ts",
+            side: "RIGHT",
+            line: 4,
+          },
+        ],
+        dispositions: [],
+        general: cleanGeneral,
+      },
+      github,
+    );
+
+    expect(result).toEqual({ skipped: false, newFindings: 3, stillOpen: 0, fixed: 0 });
+    expect(github.createInlineComment).toHaveBeenCalledOnce();
+    expect(github.createInlineComment.mock.calls[0]?.[0]).toMatchObject({ line: 2 });
+    const generalBody = github.updateGeneralComment.mock.calls.at(-1)?.[1] as string;
+    expect(generalBody).toContain("### Findings outside the diff");
+    expect(generalBody).toContain(
+      "**MEDIUM: Unchanged caller breaks**\n`src/a.ts` line 99 (RIGHT)",
+    );
+    expect(generalBody).toContain("The caller still passes the old argument.");
+    expect(generalBody).toContain(
+      "**LOW: Untouched file depends on old shape**\n`src/untouched.ts` line 4 (RIGHT)",
+    );
+    expect(generalBody).toContain(
+      "1. ![high](https://img.shields.io/badge/high-orange) **Incorrect replacement** [►](https://github.com/c/1)",
+    );
+    expect(generalBody).toContain(
+      "2. ![medium](https://img.shields.io/badge/medium-yellow) **Unchanged caller breaks**\n",
+    );
+    expect(github.updatePullRequestBody.mock.calls[1]?.[0]).toContain("✅ Janitor review complete");
+  });
+
+  it("folds a finding into the general comment when GitHub rejects its inline location", async () => {
+    const github = githubBoundary();
+    github.createInlineComment.mockRejectedValueOnce(
+      Object.assign(new Error("Line could not be resolved"), { status: 422 }),
+    );
+    const messages: string[] = [];
+    const finding = {
+      title: "Incorrect replacement",
+      body: "This changes the behavior unexpectedly.",
+      severity: "high" as const,
+      path: "src/a.ts",
+      side: "RIGHT" as const,
+      line: 2,
+    };
+
+    const result = await executeReview({
+      cwd: "/repo",
+      context,
+      git: reviewGit(),
+      github,
+      agent: agent({
+        findings: [finding, { ...finding, title: "Second issue", side: "LEFT" }],
+        dispositions: [],
+        general: cleanGeneral,
+      }),
+      configLoader: async () => ({ trackedPaths: ["src/**"], trackSpend: false }),
+      report: (message) => messages.push(message),
+    });
+
+    expect(result).toEqual({ skipped: false, newFindings: 2, stillOpen: 0, fixed: 0 });
+    expect(github.createInlineComment).toHaveBeenCalledTimes(2);
+    const generalBody = github.updateGeneralComment.mock.calls.at(-1)?.[1] as string;
+    expect(generalBody).toContain("**HIGH: Incorrect replacement**\n`src/a.ts` line 2 (RIGHT)");
+    expect(generalBody).toContain("**Incorrect replacement**\n");
+    expect(generalBody).toContain("**Second issue** [►](https://github.com/c/1)");
+    expect(messages).toContain(
+      "GitHub rejected the inline location src/a.ts:2 (RIGHT): Line could not be resolved; it will be included in the general comment.",
+    );
+  });
+
+  it("still fails the review for inline comment errors other than an invalid location", async () => {
+    const github = githubBoundary();
+    github.createInlineComment.mockRejectedValueOnce(
+      Object.assign(new Error("Bad credentials"), { status: 401 }),
+    );
+
+    await expect(
+      execute(
+        {
+          findings: [
+            {
+              title: "Incorrect replacement",
+              body: "This changes the behavior unexpectedly.",
+              severity: "high",
+              path: "src/a.ts",
+              side: "RIGHT",
+              line: 2,
+            },
+          ],
+          dispositions: [],
+          general: cleanGeneral,
+        },
+        github,
+      ),
+    ).rejects.toThrow("Bad credentials");
+    expect(github.updateGeneralComment).toHaveBeenLastCalledWith(
+      10,
+      expect.stringContaining("Review failed"),
+    );
+  });
+
+  it("lists outside-diff findings compactly when their full bodies would not fit", async () => {
+    const github = githubBoundary();
+    const largeFinding = (line: number) => ({
+      title: `Large issue ${line}`,
+      body: "x".repeat(40_000),
+      severity: "medium" as const,
+      path: "src/other.ts",
+      side: "RIGHT" as const,
+      line,
+    });
+
+    await execute(
+      { findings: [largeFinding(1), largeFinding(2)], dispositions: [], general: cleanGeneral },
+      github,
+    );
+
+    const generalBody = github.updateGeneralComment.mock.calls.at(-1)?.[1] as string;
+    expect(generalBody.length).toBeLessThanOrEqual(65_536);
+    expect(generalBody).toContain("- **MEDIUM: Large issue 1** — `src/other.ts` line 1 (RIGHT)");
+    expect(generalBody).toContain("- **MEDIUM: Large issue 2** — `src/other.ts` line 2 (RIGHT)");
+    expect(generalBody).not.toContain("xxxx");
+  });
+
+  it("keeps a published review when 422 fallbacks would overflow the compact list", async () => {
+    const github = githubBoundary();
+    github.createInlineComment.mockRejectedValue(
+      Object.assign(new Error("Line could not be resolved"), { status: 422 }),
+    );
+    const messages: string[] = [];
+    const findings = [1, 2].map((index) => ({
+      title: `${"t".repeat(40_000)} ${index}`,
+      body: "Impact",
+      severity: "low" as const,
+      path: "src/a.ts",
+      side: "RIGHT" as const,
+      line: 2,
+    }));
+
+    const result = await executeReview({
+      cwd: "/repo",
+      context,
+      git: reviewGit(),
+      github,
+      agent: agent({ findings, dispositions: [], general: cleanGeneral }),
+      configLoader: async () => ({ trackedPaths: ["src/**"], trackSpend: false }),
+      report: (message) => messages.push(message),
+    });
+
+    expect(result).toEqual({ skipped: false, newFindings: 2, stillOpen: 0, fixed: 0 });
+    const generalBody = github.updateGeneralComment.mock.calls.at(-1)?.[1] as string;
+    expect(generalBody.length).toBeLessThanOrEqual(65_536);
+    expect(generalBody).toContain("2 finding(s) were too large to list here");
+    expect(generalBody).toContain("Confidence: 4/5");
+    expect(
+      messages.filter((message) => message.startsWith("Finding outside the diff omitted")),
+    ).toHaveLength(2);
+    expect(github.updatePullRequestBody.mock.calls[1]?.[0]).toContain("✅ Janitor review complete");
+  });
+
+  it("rejects near-limit general content before publishing when fallbacks could overflow", async () => {
+    const github = githubBoundary();
+    const baseLength = renderGeneralComment(
+      cleanGeneral,
+      [{ title: "Incorrect replacement", severity: "high" }],
+      { stillOpen: 0, fixed: 0 },
+    ).length;
+    const general = {
+      ...cleanGeneral,
+      summary: cleanGeneral.summary + "s".repeat(65_536 - baseLength - 10),
+    };
+
+    await expect(
+      execute(
+        {
+          findings: [
+            {
+              title: "Incorrect replacement",
+              body: "This changes the behavior unexpectedly.",
+              severity: "high",
+              path: "src/a.ts",
+              side: "RIGHT",
+              line: 2,
+            },
+          ],
+          dispositions: [],
+          general,
+        },
+        github,
+      ),
+    ).rejects.toThrow(/comment size limit/u);
+    expect(github.createInlineComment).not.toHaveBeenCalled();
+  });
+
   it("continues the review when the running status cannot be published", async () => {
     const github = githubBoundary();
     github.getPullRequestBody.mockRejectedValueOnce(new Error("status unavailable"));
@@ -994,6 +1224,37 @@ describe("review reconciliation", () => {
     expect(github.updateGeneralComment).toHaveBeenCalledTimes(2);
   });
 
+  it("leaves a fixed thread open when GitHub refuses to resolve it", async () => {
+    const github = githubBoundary({ previous: true, general: true });
+    github.resolveThread.mockRejectedValueOnce(new Error("Resource not accessible by integration"));
+    const messages: string[] = [];
+
+    const result = await executeReview({
+      cwd: "/repo",
+      context,
+      git: reviewGit(),
+      github,
+      agent: agent({
+        findings: [],
+        dispositions: [
+          { threadId: "thread-1", status: "fixed", reason: "The unsafe branch was removed." },
+        ],
+        general: cleanGeneral,
+      }),
+      configLoader: async () => ({ trackedPaths: ["src/**"], trackSpend: false }),
+      report: (message) => messages.push(message),
+    });
+
+    expect(result).toEqual({ skipped: false, newFindings: 0, stillOpen: 0, fixed: 1 });
+    const generalBody = github.updateGeneralComment.mock.calls.at(-1)?.[1] as string;
+    expect(generalBody).toContain("- Fixed findings resolved: 0");
+    expect(generalBody).toContain("- Fixed findings that could not be resolved automatically: 1");
+    expect(messages).toContain(
+      "Unable to resolve fixed thread thread-1: Resource not accessible by integration; it was left open.",
+    );
+    expect(github.updatePullRequestBody.mock.calls[1]?.[0]).toContain("✅ Janitor review complete");
+  });
+
   it("updates the early general comment when the review fails", async () => {
     const github = githubBoundary();
     const failure = new Error("agent unavailable");
@@ -1039,7 +1300,7 @@ describe("review reconciliation", () => {
         },
         github,
       ),
-    ).rejects.toThrow(/omitted dispositions|not a changed line/u);
+    ).rejects.toThrow(/omitted dispositions/u);
     expect(github.createInlineComment).not.toHaveBeenCalled();
     expect(github.resolveThread).not.toHaveBeenCalled();
     expect(github.createGeneralComment).toHaveBeenCalledWith(
