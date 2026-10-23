@@ -107,7 +107,7 @@ export function renderOutsideDiffFindings(
         ? findings
             .map((finding) => `- ${heading(finding)} — ${findingLocation(finding)}`)
             .join("\n")
-        : `${findings.length} finding(s) were too large to list here; see the workflow logs for their titles and locations.`;
+        : `The details of ${findings.length} finding(s) were too large to include here; see the workflow logs for their locations.`;
   return `
 ### Findings outside the diff
 

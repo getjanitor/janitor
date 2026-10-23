@@ -1056,7 +1056,7 @@ describe("review reconciliation", () => {
     expect(result).toEqual({ skipped: false, newFindings: 2, stillOpen: 0, fixed: 0 });
     const generalBody = github.updateGeneralComment.mock.calls.at(-1)?.[1] as string;
     expect(generalBody.length).toBeLessThanOrEqual(65_536);
-    expect(generalBody).toContain("2 finding(s) were too large to list here");
+    expect(generalBody).toContain("The details of 2 finding(s) were too large to include here");
     expect(generalBody).toContain("Confidence: 4/5");
     expect(
       messages.filter((message) => message.startsWith("Finding outside the diff omitted")),
