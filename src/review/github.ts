@@ -178,8 +178,12 @@ export class GitHubReviewClient implements GitHubReviewBoundary {
     }));
   }
 
-  async createInlineComment(finding: NewFinding, body: string, headSha: string): Promise<void> {
-    await this.#octokit.rest.pulls.createReviewComment({
+  async createInlineComment(
+    finding: NewFinding,
+    body: string,
+    headSha: string,
+  ): Promise<string | undefined> {
+    const response = await this.#octokit.rest.pulls.createReviewComment({
       owner: this.#context.owner,
       repo: this.#context.repo,
       pull_number: this.#context.number,
@@ -189,6 +193,7 @@ export class GitHubReviewClient implements GitHubReviewBoundary {
       side: finding.side,
       body,
     });
+    return response.data?.html_url;
   }
 
   async resolveThread(threadId: string): Promise<void> {

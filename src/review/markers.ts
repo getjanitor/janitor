@@ -1,6 +1,12 @@
 import { renderSpendHistory } from "#/review/spend";
 export { SPEND_METADATA_MARKER } from "#/review/spend";
-import type { ExistingFinding, GeneralReview, NewFinding, ReviewSpendEntry } from "#/review/types";
+import type {
+  ExistingFinding,
+  FindingSeverity,
+  GeneralReview,
+  NewFinding,
+  ReviewSpendEntry,
+} from "#/review/types";
 
 const JANITOR_MARKER_NAMESPACE = "janitor:";
 
@@ -111,14 +117,65 @@ ${content}
 `;
 }
 
+const SEVERITY_BADGE_COLOR: Record<FindingSeverity, string> = {
+  critical: "critical",
+  high: "orange",
+  medium: "yellow",
+  low: "lightgrey",
+};
+
+export interface GeneralCommentFinding {
+  title: string;
+  severity: FindingSeverity;
+  url?: string;
+}
+
+function renderSeverityBadge(severity: FindingSeverity): string {
+  return `![${severity}](https://img.shields.io/badge/${severity}-${SEVERITY_BADGE_COLOR[severity]})`;
+}
+
+// Titles are capped so the list stays bounded however long the model's titles
+// are; the full title lives in the linked inline comment.
+const LISTED_TITLE_LIMIT = 120;
+
+function listedTitle(title: string): string {
+  const collapsed = title.replace(/\s+/gu, " ").trim();
+  return collapsed.length <= LISTED_TITLE_LIMIT
+    ? collapsed
+    : `${collapsed.slice(0, LISTED_TITLE_LIMIT - 1).trimEnd()}…`;
+}
+
+function renderFindingsSection(
+  findings: readonly GeneralCommentFinding[],
+  counts: { stillOpen: number; fixed: number; unresolvedFixed?: number },
+): string {
+  const items = findings.map((finding, index) => {
+    const link = finding.url === undefined ? "" : ` [►](${finding.url})`;
+    return `${index + 1}. ${renderSeverityBadge(finding.severity)} **${listedTitle(finding.title)}**${link}`;
+  });
+  const list = items.length === 0 ? "No new findings." : items.join("\n");
+  return `${list}
+
+- Existing findings still open: ${counts.stillOpen}
+- Fixed findings resolved: ${counts.fixed}
+${counts.unresolvedFixed ? `- Fixed findings that could not be resolved automatically: ${counts.unresolvedFixed}\n` : ""}`;
+}
+
 export function renderGeneralComment(
   general: GeneralReview,
-  counts: { newFindings: number; stillOpen: number; fixed: number; unresolvedFixed?: number },
+  findings: readonly GeneralCommentFinding[],
+  counts: { stillOpen: number; fixed: number; unresolvedFixed?: number },
   spendHistory?: readonly ReviewSpendEntry[],
   outsideDiff = "",
 ): string {
   return `${GENERAL_REVIEW_MARKER}
 ## Janitor review
+
+### Findings
+
+${renderFindingsSection(findings, counts)}
+${outsideDiff}
+### Summary
 
 ${general.summary}
 
@@ -128,12 +185,6 @@ ${general.summary}
 ${general.mermaid.trim()}
 \`\`\`
 
-### Findings
-
-- New findings: ${counts.newFindings}
-- Existing findings still open: ${counts.stillOpen}
-- Fixed findings resolved: ${counts.fixed}
-${counts.unresolvedFixed ? `- Fixed findings that could not be resolved automatically: ${counts.unresolvedFixed}\n` : ""}${outsideDiff}
 ### Confidence: ${general.confidence}/5
 
 ${general.confidenceReason}

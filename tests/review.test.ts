@@ -127,7 +127,7 @@ function githubBoundary(
           ]
         : [],
     ),
-    createInlineComment: vi.fn(async () => undefined),
+    createInlineComment: vi.fn(async (): Promise<string | undefined> => "https://github.com/c/1"),
     resolveThread: vi.fn(async () => undefined),
     createGeneralComment: vi.fn(async () => 10),
     updateGeneralComment: vi.fn(async () => undefined),
@@ -496,14 +496,39 @@ describe("Janitor markers and prompt", () => {
   });
 
   it("renders one marked general comment with diagram and confidence", () => {
-    const body = renderGeneralComment(cleanGeneral, {
-      newFindings: 0,
-      stillOpen: 0,
-      fixed: 0,
-    });
+    const body = renderGeneralComment(cleanGeneral, [], { stillOpen: 0, fixed: 0 });
     expect(body).toContain(GENERAL_REVIEW_MARKER);
     expect(body).toContain("```mermaid");
     expect(body).toContain("Confidence: 4/5");
+    expect(body).toContain("No new findings.");
+  });
+
+  it("lists findings with severity badges and links ahead of the summary", () => {
+    const body = renderGeneralComment(
+      cleanGeneral,
+      [
+        { title: "Reviews change\nwithout updates", severity: "medium", url: "https://x/c/1" },
+        { title: "Unlinked", severity: "critical" },
+      ],
+      { stillOpen: 2, fixed: 1 },
+    );
+    expect(body).toContain(
+      "1. ![medium](https://img.shields.io/badge/medium-yellow) **Reviews change without updates** [►](https://x/c/1)",
+    );
+    expect(body).toContain(
+      "2. ![critical](https://img.shields.io/badge/critical-critical) **Unlinked**\n",
+    );
+    expect(body).toContain("- Existing findings still open: 2\n- Fixed findings resolved: 1");
+    expect(body.indexOf("### Findings")).toBeLessThan(body.indexOf("### Summary"));
+  });
+
+  it("caps long finding titles in the findings list", () => {
+    const body = renderGeneralComment(cleanGeneral, [{ title: "x".repeat(500), severity: "low" }], {
+      stillOpen: 0,
+      fixed: 0,
+    });
+    expect(body).toContain(`**${"x".repeat(119)}…**`);
+    expect(body).not.toContain("x".repeat(120));
   });
 
   it("instructs the agent to map usages and explicitly disposition old threads", () => {
@@ -840,6 +865,10 @@ describe("review reconciliation", () => {
       10,
       expect.stringContaining("Confidence: 4/5"),
     );
+    expect(github.updateGeneralComment).toHaveBeenLastCalledWith(
+      10,
+      expect.stringContaining("**Incorrect replacement** [►](https://github.com/c/1)"),
+    );
     expect(github.getPullRequestBody).toHaveBeenCalledTimes(2);
     expect(github.updatePullRequestBody).toHaveBeenCalledTimes(2);
     expect(github.updatePullRequestBody.mock.calls[0]?.[0]).toContain(
@@ -896,7 +925,12 @@ describe("review reconciliation", () => {
     expect(generalBody).toContain(
       "**LOW: Untouched file depends on old shape**\n`src/untouched.ts` line 4 (RIGHT)",
     );
-    expect(generalBody).not.toContain("Incorrect replacement");
+    expect(generalBody).toContain(
+      "1. ![high](https://img.shields.io/badge/high-orange) **Incorrect replacement** [►](https://github.com/c/1)",
+    );
+    expect(generalBody).toContain(
+      "2. ![medium](https://img.shields.io/badge/medium-yellow) **Unchanged caller breaks**\n",
+    );
     expect(github.updatePullRequestBody.mock.calls[1]?.[0]).toContain("✅ Janitor review complete");
   });
 
@@ -933,7 +967,8 @@ describe("review reconciliation", () => {
     expect(github.createInlineComment).toHaveBeenCalledTimes(2);
     const generalBody = github.updateGeneralComment.mock.calls.at(-1)?.[1] as string;
     expect(generalBody).toContain("**HIGH: Incorrect replacement**\n`src/a.ts` line 2 (RIGHT)");
-    expect(generalBody).not.toContain("Second issue");
+    expect(generalBody).toContain("**Incorrect replacement**\n");
+    expect(generalBody).toContain("**Second issue** [►](https://github.com/c/1)");
     expect(messages).toContain(
       "GitHub rejected the inline location src/a.ts:2 (RIGHT): Line could not be resolved; it will be included in the general comment.",
     );
@@ -1031,11 +1066,11 @@ describe("review reconciliation", () => {
 
   it("rejects near-limit general content before publishing when fallbacks could overflow", async () => {
     const github = githubBoundary();
-    const baseLength = renderGeneralComment(cleanGeneral, {
-      newFindings: 1,
-      stillOpen: 0,
-      fixed: 0,
-    }).length;
+    const baseLength = renderGeneralComment(
+      cleanGeneral,
+      [{ title: "Incorrect replacement", severity: "high" }],
+      { stillOpen: 0, fixed: 0 },
+    ).length;
     const general = {
       ...cleanGeneral,
       summary: cleanGeneral.summary + "s".repeat(65_536 - baseLength - 10),

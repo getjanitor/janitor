@@ -8,6 +8,7 @@ import {
   renderGeneralComment,
   renderGeneralCommentStatus,
   renderOutsideDiffFindings,
+  type GeneralCommentFinding,
   type ReviewDescriptionStatus,
 } from "#/review/markers";
 import { requireValidModelText } from "#/review/model_result";
@@ -251,6 +252,7 @@ export async function executeReview(options: ExecuteReviewOptions): Promise<Exec
       : [];
     type OutsideDiffDetail = Parameters<typeof renderOutsideDiffFindings>[1];
     const renderGeneralBody = (
+      listed: readonly GeneralCommentFinding[],
       outsideDiff: readonly NewFinding[],
       unresolvedFixed: number,
       details: readonly OutsideDiffDetail[] = ["full", "compact", "count"],
@@ -261,8 +263,8 @@ export async function executeReview(options: ExecuteReviewOptions): Promise<Exec
           (retained) =>
             renderGeneralComment(
               modelResult.general!,
+              listed,
               {
-                newFindings: modelResult.findings.length,
                 stillOpen: stillOpen.length,
                 fixed: fixed.length - unresolvedFixed,
                 unresolvedFixed,
@@ -277,18 +279,22 @@ export async function executeReview(options: ExecuteReviewOptions): Promise<Exec
       throw new Error("General review exceeds GitHub's comment size limit");
     };
     // Fail before any GitHub mutation unless the worst case fits: every finding
-    // folded after a 422 and every fixed thread left unresolved. The count-only
-    // section grows only with the number of digits, so the final render is then
-    // guaranteed to fit at some detail level.
-    renderGeneralBody(modelResult.findings, fixed.length, ["count"]);
+    // folded after a 422, every fixed thread left unresolved, and no comment
+    // links. The count-only section grows only with the number of digits, so
+    // the final render is then guaranteed to fit at some detail level.
+    renderGeneralBody(modelResult.findings, modelResult.findings, fixed.length, ["count"]);
 
     report("Publishing validated review feedback to GitHub.");
+    const commentUrls = new Map<NewFinding, string | undefined>();
     for (const finding of inlineFindings) {
       try {
-        await options.github.createInlineComment(
+        commentUrls.set(
           finding,
-          renderFindingComment(finding),
-          options.context.headSha,
+          await options.github.createInlineComment(
+            finding,
+            renderFindingComment(finding),
+            options.context.headSha,
+          ),
         );
       } catch (error) {
         if (!isUnprocessableLocation(error)) throw error;
@@ -311,7 +317,18 @@ export async function executeReview(options: ExecuteReviewOptions): Promise<Exec
         );
       }
     }
-    const general = renderGeneralBody(outsideDiffFindings, unresolvedFixed);
+    const linkedFindings = modelResult.findings.map((finding) => ({
+      title: finding.title,
+      severity: finding.severity,
+      url: commentUrls.get(finding),
+    }));
+    let general: ReturnType<typeof renderGeneralBody>;
+    try {
+      general = renderGeneralBody(linkedFindings, outsideDiffFindings, unresolvedFixed);
+    } catch {
+      // Comment links are a convenience; drop them before dropping the review.
+      general = renderGeneralBody(modelResult.findings, outsideDiffFindings, unresolvedFixed);
+    }
     if (general.detail === "count") {
       for (const finding of outsideDiffFindings) {
         report(
