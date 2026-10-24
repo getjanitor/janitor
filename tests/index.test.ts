@@ -141,9 +141,11 @@ describe("command actions", () => {
 
     await runReviewCommand(action, []);
     await runReviewCommand(action, ["--verbose"]);
+    await runReviewCommand(action, ["--quiet"]);
 
-    expect(action).toHaveBeenNthCalledWith(1, { verbose: false });
-    expect(action).toHaveBeenNthCalledWith(2, { verbose: true });
+    expect(action).toHaveBeenNthCalledWith(1, { verbose: false, quiet: false });
+    expect(action).toHaveBeenNthCalledWith(2, { verbose: true, quiet: false });
+    expect(action).toHaveBeenNthCalledWith(3, { verbose: false, quiet: true });
   });
 
   it("does not require environment secrets while parsing the review command", async () => {
@@ -151,6 +153,6 @@ describe("command actions", () => {
 
     await runReviewCommand(action, []);
 
-    expect(action).toHaveBeenCalledWith({ verbose: false });
+    expect(action).toHaveBeenCalledWith({ verbose: false, quiet: false });
   });
 });
