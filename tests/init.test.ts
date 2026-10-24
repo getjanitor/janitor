@@ -85,6 +85,12 @@ tracked_paths = [
   "line\\nbreak/**",
   "windows\\\\path/**"
 ]
+
+# Skip pull requests whose head branch matches one of these glob patterns, such as
+# automated release branches. Exclusions take precedence over included_branches.
+# excluded_branches = ["release/**"]
+# Review only pull requests whose head branch matches one of these glob patterns.
+# included_branches = ["**"]
 `);
     expect(rendered.workflow).toContain('run: npx --yes "@matfire/janitor@next" review');
     // GitHub rejects resolveReviewThread from integration tokens without contents: write.

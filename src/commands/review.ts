@@ -80,7 +80,7 @@ export async function review(
 
   report(
     result.skipped
-      ? "Janitor review skipped: no changed path matched review.tracked_paths."
+      ? `Janitor review skipped: ${result.skipReason ?? "no review was needed."}`
       : `Janitor review complete: ${result.newFindings} new, ${result.stillOpen} still open, ${result.fixed} fixed.`,
   );
   return result;

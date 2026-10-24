@@ -120,6 +120,19 @@ janitor review
 
 Before invoking the model, Janitor loads `janitor.toml`. The review is skipped when none of the changed paths (including the old path of a rename) match `review.tracked_paths`. A match enables review of the complete PR diff.
 
+Pull requests can also be selected by their head branch, which is useful for automated pull requests that do not need a review, such as release PRs that only bump versions and the changelog:
+
+```toml
+[review]
+tracked_paths = ["**"]
+# Never review pull requests from these branches.
+excluded_branches = ["release/**", "changeset-release/**"]
+# Optionally, review only pull requests from these branches.
+included_branches = ["feat/**", "fix/**"]
+```
+
+Both lists hold glob patterns and are optional. When `included_branches` is set, a pull request is reviewed only if its head branch matches one of its patterns, and `excluded_branches` always takes precedence. Branch filtering runs before the diff is collected, so a filtered pull request costs no model usage and leaves Janitor's existing comments untouched.
+
 Per-run spend tracking is disabled by default. Enable it explicitly to append a persistent ledger to Janitor's main PR Conversation comment:
 
 ```toml

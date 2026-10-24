@@ -7,3 +7,6 @@ track_spend = true
 
 # Run a review when at least one changed path matches one of these glob patterns.
 tracked_paths = ["**"]
+
+# Release pull requests only bump versions and the changelog.
+excluded_branches = ["brel/release/**"]

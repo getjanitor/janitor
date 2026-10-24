@@ -9,7 +9,7 @@ import {
   hasAvailableModelPricing,
   reportAgentEventUsage,
 } from "#/review/agent";
-import { loadReviewConfig, shouldRunReview } from "#/review/config";
+import { loadReviewConfig, shouldReviewBranch, shouldRunReview } from "#/review/config";
 import { collectReviewDiff, parseCommentableLines, parseNameStatus } from "#/review/git";
 import {
   FINDING_MARKER,
@@ -221,6 +221,26 @@ describe("review runtime and configuration", () => {
     ).toBe(true);
   });
 
+  it("loads branch filters and lets exclusions win over inclusions", async () => {
+    const directory = await temporaryDirectory();
+    await writeFile(
+      join(directory, "janitor.toml"),
+      'version = "latest"\n[review]\ntracked_paths = ["**"]\nincluded_branches = ["feat/**", "release/**"]\nexcluded_branches = ["release/**"]\n',
+    );
+    const config = await loadReviewConfig(directory);
+    expect(config).toMatchObject({
+      includedBranches: ["feat/**", "release/**"],
+      excludedBranches: ["release/**"],
+    });
+    expect(shouldReviewBranch("feat/login", config)).toBe(true);
+    expect(shouldReviewBranch("release/v2.1.0", config)).toBe(false);
+    expect(shouldReviewBranch("fix/typo", config)).toBe(false);
+    expect(shouldReviewBranch("anything", {})).toBe(true);
+    expect(
+      shouldReviewBranch("brel/release/v2.1.0", { excludedBranches: ["brel/release/**"] }),
+    ).toBe(false);
+  });
+
   it("threads the command reporter through orchestration and the coding agent factory", async () => {
     const directory = await temporaryDirectory();
     await writeFile(
@@ -313,6 +333,20 @@ describe("review runtime and configuration", () => {
       "version = 'latest'\n[review]\ntracked_paths = ['**']\ntrack_spend = 'yes'\n",
     );
     await expect(loadReviewConfig(directory)).rejects.toThrow(/track_spend must be boolean/u);
+
+    await writeFile(
+      configPath,
+      "version = 'latest'\n[review]\ntracked_paths = ['**']\nincluded_branches = []\n",
+    );
+    await expect(loadReviewConfig(directory)).rejects.toThrow(/included_branches/u);
+
+    await writeFile(
+      configPath,
+      "version = 'latest'\n[review]\ntracked_paths = ['**']\nexcluded_branches = ['']\n",
+    );
+    await expect(loadReviewConfig(directory)).rejects.toThrow(
+      /excluded_branches\[0\] must be non-empty/u,
+    );
   });
 
   it("loads explicit spend tracking settings", async () => {
@@ -1224,6 +1258,32 @@ describe("review reconciliation", () => {
       configLoader: async () => ({ trackedPaths: ["src/**"], trackSpend: false }),
     });
     expect(result.skipped).toBe(true);
+    expect(github.listGeneralComments).not.toHaveBeenCalled();
+    expect(reviewAgent.run).not.toHaveBeenCalled();
+  });
+
+  it("skips excluded branches before collecting the diff", async () => {
+    const github = githubBoundary();
+    const git = reviewGit();
+    const gitRun = vi.spyOn(git, "run");
+    const reviewAgent = agent({ findings: [], dispositions: [], general: cleanGeneral });
+    const result = await executeReview({
+      cwd: "/repo",
+      context: { ...context, headRef: "brel/release/v2.1.0" },
+      git,
+      github,
+      agent: reviewAgent,
+      configLoader: async () => ({
+        trackedPaths: ["**"],
+        trackSpend: false,
+        excludedBranches: ["brel/release/**"],
+      }),
+    });
+    expect(result).toMatchObject({
+      skipped: true,
+      skipReason: expect.stringContaining("brel/release/v2.1.0"),
+    });
+    expect(gitRun).not.toHaveBeenCalled();
     expect(github.listGeneralComments).not.toHaveBeenCalled();
     expect(reviewAgent.run).not.toHaveBeenCalled();
   });
