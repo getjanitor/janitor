@@ -21,12 +21,17 @@ export const reviewCliOptions = {
       type: Boolean,
       description: "Show detailed review and agent progress logs",
     },
+    quiet: {
+      type: Boolean,
+      description: "Hide review step logs (ignored with --verbose)",
+    },
   },
   strictFlags: true,
 } satisfies CliOptions;
 
 export interface ReviewOptions {
   verbose?: boolean;
+  quiet?: boolean;
 }
 
 export interface ReviewDependencies {
@@ -52,7 +57,9 @@ export async function review(
   const report = dependencies.report ?? console.log;
   const environmentInput = dependencies.environment ?? process.env;
   const verbose = options.verbose === true || environmentInput.JANITOR_VERBOSE === "1";
+  const quiet = options.quiet === true || environmentInput.JANITOR_QUIET === "1";
   const progress = verbose ? report : () => undefined;
+  const step = verbose || !quiet ? report : () => undefined;
   const environment = readReviewEnvironment(environmentInput);
   const context = await (dependencies.readContext ?? readPullRequestContext)(
     environment.githubEventPath,
@@ -76,6 +83,7 @@ export async function review(
         }))
     )(environment, context),
     report: progress,
+    step,
   });
 
   report(
@@ -89,7 +97,11 @@ export async function review(
 export type ReviewAction = (options: ReviewOptions) => unknown | Promise<unknown>;
 
 export function runReviewCommand(action: ReviewAction = review, argv?: string[]) {
-  return cli(reviewCliOptions, ({ flags }) => action({ verbose: flags.verbose ?? false }), argv);
+  return cli(
+    reviewCliOptions,
+    ({ flags }) => action({ verbose: flags.verbose ?? false, quiet: flags.quiet ?? false }),
+    argv,
+  );
 }
 
 export default function reviewCommand() {

@@ -85,7 +85,7 @@ Configure all three values as **GitHub Actions secrets** in the repository:
 - `JANITOR_MODEL`
 - `JANITOR_PROVIDER_KEY`
 
-Optionally configure `JANITOR_VERBOSE` as a **GitHub Actions repository variable** with the value `1` to enable detailed review logs in the generated workflow.
+Optionally configure `JANITOR_VERBOSE` as a **GitHub Actions repository variable** with the value `1` to enable detailed review logs in the generated workflow, or `JANITOR_QUIET` with the value `1` to hide the review step logs.
 
 The generated pull-request workflow grants only `contents: write` and `pull-requests: write`. It uses `GITHUB_TOKEN` to post PR-level and diff comments, and resolve review threads for findings that have been fixed. GitHub rejects the `resolveReviewThread` mutation from integration tokens that lack `contents: write`, even though Janitor never pushes to the repository. Because that token can write repository contents and is handed to the Janitor package that `npx` downloads, pin an exact Janitor version instead of a floating tag such as `latest` if you want to limit exposure to a compromised release. The workflow intentionally skips pull requests from forks because repository secrets and write access are unavailable to those runs. Runs are grouped by pull request and a newer event cancels an obsolete in-progress review.
 
@@ -142,6 +142,8 @@ tracked_paths = ["**"]
 ```
 
 The ledger includes successful and failed agent runs, while path-filtered skips are omitted. Input totals include uncached input plus cache-read and cache-write prompt tokens; output totals include reasoning tokens when the provider reports them. Costs are estimates from the agent library's model catalog, and models without available pricing display `—`. Janitor retains the newest 50 runs, dropping additional oldest entries when necessary to stay within GitHub's comment limit.
+
+By default, Janitor logs each review step as it starts (initialization, context gathering, reviewing, and posting feedback) followed by a final summary line. Hide the step logs with the optional GitHub Actions repository variable `JANITOR_QUIET` set to `1`, or with `janitor review --quiet` / `JANITOR_QUIET=1` when invoking the command directly; the final summary is still printed, and verbose mode takes precedence over quiet mode.
 
 Detailed Actions logging is disabled by default. Enable it in the generated workflow by setting the optional GitHub Actions repository variable `JANITOR_VERBOSE` to `1`. When invoking the command directly, use either `janitor review --verbose` or `JANITOR_VERBOSE=1`. Verbose output reports review setup, diff collection, previous-feedback loading, validation, publication, and concise agent activity. Tool starts/results, retries, and context compaction are visible, but model narration and raw tool results are not emitted.
 

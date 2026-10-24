@@ -28,6 +28,20 @@ import type {
 
 const GITHUB_COMMENT_LIMIT = 65_536;
 
+const REVIEW_STEPS = {
+  initialization: [1, "Initialization"],
+  context: [2, "Context gathering"],
+  review: [3, "Reviewing"],
+  publish: [4, "Posting feedback"],
+} as const;
+
+type ReviewStep = keyof typeof REVIEW_STEPS;
+
+function formatReviewStep(step: ReviewStep, detail: string): string {
+  const [index, label] = REVIEW_STEPS[step];
+  return `[${index}/${Object.keys(REVIEW_STEPS).length}] ${label}: ${detail}`;
+}
+
 export interface ExecuteReviewOptions {
   cwd: string;
   context: PullRequestContext;
@@ -35,7 +49,10 @@ export interface ExecuteReviewOptions {
   github: GitHubReviewBoundary;
   agent: ReviewAgentBoundary;
   configLoader?: typeof loadReviewConfig;
+  // Detailed progress, shown only in verbose mode.
   report?: (message: string) => void;
+  // High-level review phases, shown unless explicitly silenced.
+  step?: (message: string) => void;
 }
 
 export interface ExecuteReviewResult {
@@ -144,6 +161,12 @@ function isUnprocessableLocation(error: unknown): boolean {
 
 export async function executeReview(options: ExecuteReviewOptions): Promise<ExecuteReviewResult> {
   const report = options.report ?? (() => undefined);
+  const emitStep = options.step ?? (() => undefined);
+  let currentStep: ReviewStep = "initialization";
+  const step = (name: ReviewStep, detail: string) => {
+    currentStep = name;
+    emitStep(formatReviewStep(name, detail));
+  };
   let generalCommentId: number | undefined;
   let trackSpend = false;
   let spendHistory: ReviewSpendEntry[] = [];
@@ -151,9 +174,10 @@ export async function executeReview(options: ExecuteReviewOptions): Promise<Exec
   const usage = createReviewUsageAccumulator();
 
   try {
-    report(`Starting Janitor review for pull request #${options.context.number}.`);
-
-    report("Loading review configuration and collecting the pull request diff.");
+    step(
+      "initialization",
+      `starting Janitor review for pull request #${options.context.number} and loading janitor.toml.`,
+    );
     const config = await (options.configLoader ?? loadReviewConfig)(options.cwd);
     trackSpend = config.trackSpend;
     if (!shouldReviewBranch(options.context.headRef, config)) {
@@ -161,6 +185,8 @@ export async function executeReview(options: ExecuteReviewOptions): Promise<Exec
       report(`Skipping agent review: ${skipReason}`);
       return { skipped: true, skipReason, newFindings: 0, stillOpen: 0, fixed: 0 };
     }
+
+    step("context", "collecting the pull request diff.");
     const diff = await collectReviewDiff(options.cwd, options.context, options.git);
     report(`Collected ${diff.files.length} changed file(s).`);
     if (diff.files.length === 0 || !shouldRunReview(diff.files, config.trackedPaths)) {
@@ -169,7 +195,7 @@ export async function executeReview(options: ExecuteReviewOptions): Promise<Exec
       return { skipped: true, skipReason, newFindings: 0, stillOpen: 0, fixed: 0 };
     }
 
-    report("Loading previous Janitor feedback from GitHub.");
+    step("context", "loading previous Janitor feedback from GitHub.");
     const [comments, threads] = await Promise.all([
       options.github.listGeneralComments(),
       options.github.listReviewThreads(),
@@ -193,7 +219,7 @@ export async function executeReview(options: ExecuteReviewOptions): Promise<Exec
     }
     report("General review comment set to running.");
 
-    report("Starting the coding review agent.");
+    step("review", "running the coding review agent.");
     agentInvoked = true;
     const modelResult = await options.agent.run(
       {
@@ -265,7 +291,7 @@ export async function executeReview(options: ExecuteReviewOptions): Promise<Exec
     // the final render is then guaranteed to fit at some detail level.
     renderGeneralBody(modelResult.findings, modelResult.findings, fixed.length, ["count"]);
 
-    report("Publishing validated review feedback to GitHub.");
+    step("publish", "publishing validated review feedback to GitHub.");
     const commentUrls = new Map<NewFinding, string | undefined>();
     for (const finding of inlineFindings) {
       try {
@@ -328,7 +354,9 @@ export async function executeReview(options: ExecuteReviewOptions): Promise<Exec
       fixed: fixed.length,
     };
   } catch (error) {
-    report(`Janitor review failed: ${errorMessage(error)}`);
+    emitStep(
+      `Janitor review failed during ${REVIEW_STEPS[currentStep][1].toLowerCase()}: ${errorMessage(error)}`,
+    );
     if (generalCommentId !== undefined) {
       try {
         if (trackSpend && agentInvoked) {

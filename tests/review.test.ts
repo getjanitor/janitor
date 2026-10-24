@@ -275,11 +275,12 @@ describe("review runtime and configuration", () => {
     );
 
     expect(createAgent).toHaveBeenCalledOnce();
-    expect(reports).toContain("Starting the coding review agent.");
+    expect(reports).toContain("[3/4] Reviewing: running the coding review agent.");
+    expect(reports).toContain("Agent output validated successfully.");
     expect(reports.at(-1)).toContain("Janitor review complete:");
   });
 
-  it("keeps progress quiet by default and enables it with JANITOR_VERBOSE=1", async () => {
+  it("reports steps by default, details with JANITOR_VERBOSE=1, and nothing extra with JANITOR_QUIET=1", async () => {
     const directory = await temporaryDirectory();
     await writeFile(
       join(directory, "janitor.toml"),
@@ -304,16 +305,31 @@ describe("review runtime and configuration", () => {
     };
 
     await review({}, { ...dependencies, environment: baseEnvironment });
-    expect(reports).toHaveLength(1);
-    expect(reports[0]).toContain("Janitor review complete:");
+    expect(reports).toEqual([
+      "[1/4] Initialization: starting Janitor review for pull request #12 and loading janitor.toml.",
+      "[2/4] Context gathering: collecting the pull request diff.",
+      "[2/4] Context gathering: loading previous Janitor feedback from GitHub.",
+      "[3/4] Reviewing: running the coding review agent.",
+      "[4/4] Posting feedback: publishing validated review feedback to GitHub.",
+      "Janitor review complete: 0 new, 0 still open, 0 fixed.",
+    ]);
 
     reports.length = 0;
     await review(
       {},
       { ...dependencies, environment: { ...baseEnvironment, JANITOR_VERBOSE: "1" } },
     );
-    expect(reports).toContain("Starting the coding review agent.");
+    expect(reports).toContain("[3/4] Reviewing: running the coding review agent.");
+    expect(reports).toContain("Agent output validated successfully.");
     expect(reports.at(-1)).toContain("Janitor review complete:");
+
+    reports.length = 0;
+    await review({}, { ...dependencies, environment: { ...baseEnvironment, JANITOR_QUIET: "1" } });
+    expect(reports).toEqual(["Janitor review complete: 0 new, 0 still open, 0 fixed."]);
+
+    reports.length = 0;
+    await review({ quiet: true, verbose: true }, { ...dependencies, environment: baseEnvironment });
+    expect(reports).toContain("[3/4] Reviewing: running the coding review agent.");
   });
 
   it("rejects malformed review configuration", async () => {
@@ -1288,7 +1304,7 @@ describe("review reconciliation", () => {
     expect(reviewAgent.run).not.toHaveBeenCalled();
   });
 
-  it("reports lifecycle progress in order", async () => {
+  it("interleaves review steps with detailed lifecycle progress in order", async () => {
     const messages: string[] = [];
     await executeReview({
       cwd: "/repo",
@@ -1298,23 +1314,37 @@ describe("review reconciliation", () => {
       agent: agent({ findings: [], dispositions: [], general: cleanGeneral }),
       configLoader: async () => ({ trackedPaths: ["src/**"], trackSpend: false }),
       report: (message) => messages.push(message),
+      step: (message) => messages.push(message),
     });
 
-    expect(messages).toEqual(
-      expect.arrayContaining([
-        expect.stringContaining("collecting the pull request diff"),
-        expect.stringContaining("Loading previous Janitor feedback"),
-        expect.stringContaining("Starting the coding review agent"),
-        expect.stringContaining("validating its output"),
-        expect.stringContaining("Publishing validated review feedback"),
-      ]),
-    );
-    expect(messages.indexOf("Starting the coding review agent.")).toBeLessThan(
-      messages.indexOf("Coding review agent finished; validating its output."),
-    );
-    expect(messages.indexOf("Agent output validated successfully.")).toBeLessThan(
-      messages.indexOf("Publishing validated review feedback to GitHub."),
-    );
+    const order = [
+      "[1/4] Initialization: starting Janitor review for pull request #12 and loading janitor.toml.",
+      "[2/4] Context gathering: collecting the pull request diff.",
+      "[2/4] Context gathering: loading previous Janitor feedback from GitHub.",
+      "[3/4] Reviewing: running the coding review agent.",
+      "Coding review agent finished; validating its output.",
+      "Agent output validated successfully.",
+      "[4/4] Posting feedback: publishing validated review feedback to GitHub.",
+      "Review feedback published to GitHub.",
+    ].map((message) => messages.indexOf(message));
+    expect(order).not.toContain(-1);
+    expect(order).toEqual([...order].sort((left, right) => left - right));
+  });
+
+  it("names the failing step", async () => {
+    const steps: string[] = [];
+    await expect(
+      executeReview({
+        cwd: "/repo",
+        context,
+        git: reviewGit(),
+        github: githubBoundary(),
+        agent: { run: vi.fn(async () => Promise.reject(new Error("model down"))) },
+        configLoader: async () => ({ trackedPaths: ["src/**"], trackSpend: false }),
+        step: (message) => steps.push(message),
+      }),
+    ).rejects.toThrow("model down");
+    expect(steps.at(-1)).toBe("Janitor review failed during reviewing: model down");
   });
 });
 

@@ -107,6 +107,7 @@ tracked_paths = [
     expect(rendered.workflow).toContain("ref: ${{ github.event.pull_request.head.sha }}");
     expect(rendered.workflow).toContain("GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}");
     expect(rendered.workflow).toContain("JANITOR_VERBOSE: ${{ vars.JANITOR_VERBOSE }}");
+    expect(rendered.workflow).toContain("JANITOR_QUIET: ${{ vars.JANITOR_QUIET }}");
     expect(rendered.workflow).toContain("JANITOR_MODEL: ${{ secrets.JANITOR_MODEL }}");
     expect(rendered.workflow).toContain("JANITOR_PROVIDER: ${{ secrets.JANITOR_PROVIDER }}");
     expect(rendered.workflow).toContain(
@@ -138,6 +139,7 @@ tracked_paths = [
     expect(rendered.workflow).toContain(`        env:
           GITHUB_TOKEN: \${{ steps.app-token.outputs.token }}
           JANITOR_VERBOSE: \${{ vars.JANITOR_VERBOSE }}
+          JANITOR_QUIET: \${{ vars.JANITOR_QUIET }}
 `);
     expect(rendered.workflow).not.toContain("secrets.GITHUB_TOKEN");
   });

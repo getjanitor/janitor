@@ -44,6 +44,7 @@ jobs:
         env:
           GITHUB_TOKEN: {% if github_app %}${{ steps.app-token.outputs.token }}{% else %}${{ secrets.GITHUB_TOKEN }}{% endif %}
           JANITOR_VERBOSE: ${{ vars.JANITOR_VERBOSE }}
+          JANITOR_QUIET: ${{ vars.JANITOR_QUIET }}
           JANITOR_MODEL: ${{ secrets.JANITOR_MODEL }}
           JANITOR_PROVIDER: ${{ secrets.JANITOR_PROVIDER }}
           JANITOR_PROVIDER_KEY: ${{ secrets.JANITOR_PROVIDER_KEY }}
