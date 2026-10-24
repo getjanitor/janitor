@@ -1,3 +1,10 @@
+## [2.2.0] - 2026-10-24
+
+### 🚀 Features
+
+- Stop writing review status into the pull request description
+- Skip reviews for pull requests by head branch
+- Always log the current review step
 ## [2.1.0] - 2026-10-23
 
 ### 🚀 Features
