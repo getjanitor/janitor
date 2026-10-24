@@ -1,4 +1,4 @@
-import { loadReviewConfig, shouldRunReview } from "#/review/config";
+import { loadReviewConfig, shouldReviewBranch, shouldRunReview } from "#/review/config";
 import { collectReviewDiff, isCommentableLocation } from "#/review/git";
 import {
   findJanitorGeneralComment,
@@ -40,6 +40,8 @@ export interface ExecuteReviewOptions {
 
 export interface ExecuteReviewResult {
   skipped: boolean;
+  /** Why the agent review was skipped; set only when `skipped` is true. */
+  skipReason?: string;
   newFindings: number;
   stillOpen: number;
   fixed: number;
@@ -154,11 +156,17 @@ export async function executeReview(options: ExecuteReviewOptions): Promise<Exec
     report("Loading review configuration and collecting the pull request diff.");
     const config = await (options.configLoader ?? loadReviewConfig)(options.cwd);
     trackSpend = config.trackSpend;
+    if (!shouldReviewBranch(options.context.headRef, config)) {
+      const skipReason = `branch ${options.context.headRef} is not selected by review.included_branches/excluded_branches.`;
+      report(`Skipping agent review: ${skipReason}`);
+      return { skipped: true, skipReason, newFindings: 0, stillOpen: 0, fixed: 0 };
+    }
     const diff = await collectReviewDiff(options.cwd, options.context, options.git);
     report(`Collected ${diff.files.length} changed file(s).`);
     if (diff.files.length === 0 || !shouldRunReview(diff.files, config.trackedPaths)) {
-      report("No changed path matched review.tracked_paths; skipping agent review.");
-      return { skipped: true, newFindings: 0, stillOpen: 0, fixed: 0 };
+      const skipReason = "no changed path matched review.tracked_paths.";
+      report(`Skipping agent review: ${skipReason}`);
+      return { skipped: true, skipReason, newFindings: 0, stillOpen: 0, fixed: 0 };
     }
 
     report("Loading previous Janitor feedback from GitHub.");
