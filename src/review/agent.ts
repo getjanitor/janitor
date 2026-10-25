@@ -41,6 +41,7 @@ export function buildReviewPrompt(input: ReviewAgentInput): string {
     path: discussion.path,
     line: discussion.line,
     originalLine: discussion.originalLine,
+    outdated: discussion.isOutdated,
     finding: discussion.body,
     replies: discussion.replies,
   }));

@@ -229,6 +229,7 @@ export function findResolvedJanitorDiscussions(
         path: thread.path,
         line: thread.line,
         originalLine: thread.originalLine,
+        isOutdated: thread.isOutdated,
         body: comment.body.replace(FINDING_MARKER, "").trim(),
         replies,
       },

@@ -74,6 +74,7 @@ export interface ResolvedFindingDiscussion {
   path: string;
   line: number | null;
   originalLine: number | null;
+  isOutdated: boolean;
   body: string;
   replies: FindingReply[];
 }
