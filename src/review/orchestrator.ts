@@ -3,6 +3,7 @@ import { collectReviewDiff, isCommentableLocation } from "#/review/git";
 import {
   findJanitorGeneralComment,
   findOpenJanitorFindings,
+  findResolvedJanitorDiscussions,
   renderFindingComment,
   renderGeneralComment,
   renderGeneralCommentStatus,
@@ -62,6 +63,7 @@ export interface ExecuteReviewResult {
   newFindings: number;
   stillOpen: number;
   fixed: number;
+  dismissed: number;
 }
 
 function validateModelResult(
@@ -98,8 +100,11 @@ function validateModelResult(
       throw new Error(`Model review returned duplicate disposition for ${disposition.threadId}`);
     }
     dispositionIds.add(disposition.threadId);
-    if (disposition.status === "fixed") {
-      requireValidModelText(disposition.reason, `fixed reason for ${disposition.threadId}`);
+    if (disposition.status !== "still_present") {
+      requireValidModelText(
+        disposition.reason,
+        `${disposition.status} reason for ${disposition.threadId}`,
+      );
     }
   }
   const missing = [...expectedThreadIds].filter((threadId) => !dispositionIds.has(threadId));
@@ -183,7 +188,7 @@ export async function executeReview(options: ExecuteReviewOptions): Promise<Exec
     if (!shouldReviewBranch(options.context.headRef, config)) {
       const skipReason = `branch ${options.context.headRef} is not selected by review.included_branches/excluded_branches.`;
       report(`Skipping agent review: ${skipReason}`);
-      return { skipped: true, skipReason, newFindings: 0, stillOpen: 0, fixed: 0 };
+      return { skipped: true, skipReason, newFindings: 0, stillOpen: 0, fixed: 0, dismissed: 0 };
     }
 
     step("context", "collecting the pull request diff.");
@@ -192,7 +197,7 @@ export async function executeReview(options: ExecuteReviewOptions): Promise<Exec
     if (diff.files.length === 0 || !shouldRunReview(diff.files, config.trackedPaths)) {
       const skipReason = "no changed path matched review.tracked_paths.";
       report(`Skipping agent review: ${skipReason}`);
-      return { skipped: true, skipReason, newFindings: 0, stillOpen: 0, fixed: 0 };
+      return { skipped: true, skipReason, newFindings: 0, stillOpen: 0, fixed: 0, dismissed: 0 };
     }
 
     step("context", "loading previous Janitor feedback from GitHub.");
@@ -205,7 +210,14 @@ export async function executeReview(options: ExecuteReviewOptions): Promise<Exec
       spendHistory = parseSpendHistory(generalComment.body);
     }
     const previousFindings = findOpenJanitorFindings(threads);
-    report(`Loaded ${previousFindings.length} unresolved Janitor finding(s).`);
+    const resolvedDiscussions = findResolvedJanitorDiscussions(threads);
+    const replyCount = previousFindings.reduce(
+      (total, finding) => total + finding.replies.length,
+      0,
+    );
+    report(
+      `Loaded ${previousFindings.length} unresolved Janitor finding(s) with ${replyCount} reply(ies) and ${resolvedDiscussions.length} resolved discussed finding(s).`,
+    );
 
     const runningGeneralBody = renderGeneralCommentStatus(
       "running",
@@ -227,6 +239,7 @@ export async function executeReview(options: ExecuteReviewOptions): Promise<Exec
         context: options.context,
         diff,
         previousFindings,
+        resolvedDiscussions,
       },
       trackSpend ? usage.report : undefined,
     );
@@ -248,6 +261,9 @@ export async function executeReview(options: ExecuteReviewOptions): Promise<Exec
     }
 
     const fixed = modelResult.dispositions.filter((disposition) => disposition.status === "fixed");
+    const dismissed = modelResult.dispositions.filter(
+      (disposition) => disposition.status === "dismissed",
+    );
     const stillOpen = modelResult.dispositions.filter(
       (disposition) => disposition.status === "still_present",
     );
@@ -261,7 +277,7 @@ export async function executeReview(options: ExecuteReviewOptions): Promise<Exec
     const renderGeneralBody = (
       listed: readonly GeneralCommentFinding[],
       outsideDiff: readonly NewFinding[],
-      unresolvedFixed: number,
+      unresolved: { fixed: number; dismissed: number },
       details: readonly OutsideDiffDetail[] = ["full", "compact", "count"],
     ): { body: string; detail: OutsideDiffDetail } => {
       for (const detail of details) {
@@ -273,8 +289,10 @@ export async function executeReview(options: ExecuteReviewOptions): Promise<Exec
               listed,
               {
                 stillOpen: stillOpen.length,
-                fixed: fixed.length - unresolvedFixed,
-                unresolvedFixed,
+                fixed: fixed.length - unresolved.fixed,
+                dismissed: dismissed.length - unresolved.dismissed,
+                unresolvedFixed: unresolved.fixed,
+                unresolvedDismissed: unresolved.dismissed,
               },
               trackSpend ? retained : undefined,
               renderOutsideDiffFindings(outsideDiff, detail),
@@ -286,10 +304,15 @@ export async function executeReview(options: ExecuteReviewOptions): Promise<Exec
       throw new Error("General review exceeds GitHub's comment size limit");
     };
     // Fail before any GitHub mutation unless the worst case fits: every finding
-    // folded after a 422, every fixed thread left unresolved, and no comment
+    // folded after a 422, every fixed or dismissed thread left unresolved, and no comment
     // links. The count-only section grows only with the number of digits, so
     // the final render is then guaranteed to fit at some detail level.
-    renderGeneralBody(modelResult.findings, modelResult.findings, fixed.length, ["count"]);
+    renderGeneralBody(
+      modelResult.findings,
+      modelResult.findings,
+      { fixed: fixed.length, dismissed: dismissed.length },
+      ["count"],
+    );
 
     step("publish", "publishing validated review feedback to GitHub.");
     const commentUrls = new Map<NewFinding, string | undefined>();
@@ -311,16 +334,16 @@ export async function executeReview(options: ExecuteReviewOptions): Promise<Exec
         outsideDiffFindings.push(finding);
       }
     }
-    let unresolvedFixed = 0;
-    for (const disposition of fixed) {
+    const unresolved = { fixed: 0, dismissed: 0 };
+    for (const disposition of [...fixed, ...dismissed]) {
       // A thread GitHub refuses to resolve (e.g. a token without permission)
       // stays open; it must not discard the rest of an otherwise complete review.
       try {
         await options.github.resolveThread(disposition.threadId);
       } catch (error) {
-        unresolvedFixed++;
+        unresolved[disposition.status]++;
         report(
-          `Unable to resolve fixed thread ${disposition.threadId}: ${errorMessage(error)}; it was left open.`,
+          `Unable to resolve ${disposition.status} thread ${disposition.threadId}: ${errorMessage(error)}; it was left open.`,
         );
       }
     }
@@ -331,10 +354,10 @@ export async function executeReview(options: ExecuteReviewOptions): Promise<Exec
     }));
     let general: ReturnType<typeof renderGeneralBody>;
     try {
-      general = renderGeneralBody(linkedFindings, outsideDiffFindings, unresolvedFixed);
+      general = renderGeneralBody(linkedFindings, outsideDiffFindings, unresolved);
     } catch {
       // Comment links are a convenience; drop them before dropping the review.
-      general = renderGeneralBody(modelResult.findings, outsideDiffFindings, unresolvedFixed);
+      general = renderGeneralBody(modelResult.findings, outsideDiffFindings, unresolved);
     }
     if (general.detail === "count") {
       for (const finding of outsideDiffFindings) {
@@ -352,6 +375,7 @@ export async function executeReview(options: ExecuteReviewOptions): Promise<Exec
       newFindings: modelResult.findings.length,
       stillOpen: stillOpen.length,
       fixed: fixed.length,
+      dismissed: dismissed.length,
     };
   } catch (error) {
     emitStep(

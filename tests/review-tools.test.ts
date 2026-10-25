@@ -28,6 +28,7 @@ const input: ReviewAgentInput = {
     ],
   },
   previousFindings: [],
+  resolvedDiscussions: [],
 };
 
 async function execute(
@@ -73,6 +74,26 @@ describe("review agent tools", () => {
       { threadId: "thread", status: "fixed", reason: "Removed" },
     ]);
     expect(output.general).toMatchObject({ confidence: 4 });
+  });
+
+  it("records dismissed findings only with a reason", async () => {
+    const output: ModelReviewResult = { findings: [], dispositions: [], general: undefined };
+    const { tools } = createReviewTools(input, output);
+    await expect(
+      execute(tools, "disposition_existing_finding", { threadId: "thread", status: "dismissed" }),
+    ).rejects.toThrow(/dismissed disposition requires a reason/u);
+    await execute(tools, "disposition_existing_finding", {
+      threadId: "thread",
+      status: "dismissed",
+      reason: "The caller already validates the input.",
+    });
+    expect(output.dispositions).toEqual([
+      {
+        threadId: "thread",
+        status: "dismissed",
+        reason: "The caller already validates the input.",
+      },
+    ]);
   });
 
   it("rejects unknown diff paths and duplicate final submissions", async () => {

@@ -154,7 +154,7 @@ The coding agent receives read-only repository search tools and the PR diff. It 
 
 Janitor creates its marked general comment as soon as the first review starts, then updates that same comment with the result. Because reruns edit the original comment instead of posting another one, it keeps its early position in the Conversation while later commits and automation accumulate below it. A failed review updates the comment with a failure state.
 
-Each rerun reviews the full current diff and re-evaluates Janitor's unresolved threads. Findings that are still present remain open without duplicate comments, findings explicitly verified as fixed are resolved, and new findings receive new inline comments. Only Janitor-authored marked threads are eligible for automatic resolution; user and third-party review threads are never changed.
+Each rerun reviews the full current diff and re-evaluates Janitor's unresolved threads. Findings that are still present remain open without duplicate comments, findings explicitly verified as fixed are resolved, and new findings receive new inline comments. Replies posted under a finding are passed to the agent: when a reply explains why the finding is wrong and the agent confirms that against the code, the finding is dismissed and its thread resolved. Replies are treated as claims to verify, not instructions. Replies on resolved findings are also given to the agent so it doesn't raise an issue the discussion already rejected. Only Janitor-authored marked threads are eligible for automatic resolution; user and third-party review threads are never changed.
 
 ## Adding a command
 

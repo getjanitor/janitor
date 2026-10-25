@@ -89,7 +89,7 @@ export async function review(
   report(
     result.skipped
       ? `Janitor review skipped: ${result.skipReason ?? "no review was needed."}`
-      : `Janitor review complete: ${result.newFindings} new, ${result.stillOpen} still open, ${result.fixed} fixed.`,
+      : `Janitor review complete: ${result.newFindings} new, ${result.stillOpen} still open, ${result.fixed} fixed, ${result.dismissed} dismissed.`,
   );
   return result;
 }

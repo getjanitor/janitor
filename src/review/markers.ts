@@ -2,9 +2,11 @@ import { renderSpendHistory } from "#/review/spend";
 export { SPEND_METADATA_MARKER } from "#/review/spend";
 import type {
   ExistingFinding,
+  FindingReply,
   FindingSeverity,
   GeneralReview,
   NewFinding,
+  ResolvedFindingDiscussion,
   ReviewSpendEntry,
 } from "#/review/types";
 
@@ -90,26 +92,43 @@ function listedTitle(title: string): string {
     : `${collapsed.slice(0, LISTED_TITLE_LIMIT - 1).trimEnd()}…`;
 }
 
+export interface FindingCounts {
+  stillOpen: number;
+  fixed: number;
+  dismissed?: number;
+  unresolvedFixed?: number;
+  unresolvedDismissed?: number;
+}
+
 function renderFindingsSection(
   findings: readonly GeneralCommentFinding[],
-  counts: { stillOpen: number; fixed: number; unresolvedFixed?: number },
+  counts: FindingCounts,
 ): string {
   const items = findings.map((finding, index) => {
     const link = finding.url === undefined ? "" : ` [►](${finding.url})`;
     return `${index + 1}. ${renderSeverityBadge(finding.severity)} **${listedTitle(finding.title)}**${link}`;
   });
   const list = items.length === 0 ? "No new findings." : items.join("\n");
+  const optionalCounts: Array<[number | undefined, string]> = [
+    [counts.dismissed, "Findings dismissed after discussion"],
+    [counts.unresolvedFixed, "Fixed findings that could not be resolved automatically"],
+    [counts.unresolvedDismissed, "Dismissed findings that could not be resolved automatically"],
+  ];
+  const extra = optionalCounts
+    .filter(([count]) => count)
+    .map(([count, label]) => `- ${label}: ${count}\n`)
+    .join("");
   return `${list}
 
 - Existing findings still open: ${counts.stillOpen}
 - Fixed findings resolved: ${counts.fixed}
-${counts.unresolvedFixed ? `- Fixed findings that could not be resolved automatically: ${counts.unresolvedFixed}\n` : ""}`;
+${extra}`;
 }
 
 export function renderGeneralComment(
   general: GeneralReview,
   findings: readonly GeneralCommentFinding[],
-  counts: { stillOpen: number; fixed: number; unresolvedFixed?: number },
+  counts: FindingCounts,
   spendHistory?: readonly ReviewSpendEntry[],
   outsideDiff = "",
 ): string {
@@ -159,16 +178,24 @@ export function findJanitorGeneralComment(
   );
 }
 
+// Janitor creates standalone inline comments, so ownership belongs to the
+// thread's root comment. A later Janitor reply must not make a user-owned
+// thread eligible for automatic resolution.
+function janitorFindingRoot(thread: ThreadShape) {
+  const comment = thread.comments[0];
+  return isBotAuthor(comment?.author ?? null) && comment.body.includes(FINDING_MARKER)
+    ? comment
+    : undefined;
+}
+
+function threadReplies(thread: ThreadShape): FindingReply[] {
+  return thread.comments.slice(1).map((reply) => ({ author: reply.author, body: reply.body }));
+}
+
 export function findOpenJanitorFindings(threads: ThreadShape[]): ExistingFinding[] {
   return threads.flatMap((thread) => {
-    if (thread.isResolved) {
-      return [];
-    }
-    // Janitor creates standalone inline comments, so ownership belongs to the
-    // thread's root comment. A later Janitor reply must not make a user-owned
-    // thread eligible for automatic resolution.
-    const comment = thread.comments[0];
-    if (!isBotAuthor(comment?.author ?? null) || !comment.body.includes(FINDING_MARKER)) {
+    const comment = janitorFindingRoot(thread);
+    if (thread.isResolved || comment === undefined) {
       return [];
     }
     return [
@@ -180,6 +207,30 @@ export function findOpenJanitorFindings(threads: ThreadShape[]): ExistingFinding
         originalLine: thread.originalLine,
         isOutdated: thread.isOutdated,
         body: comment.body.replace(FINDING_MARKER, "").trim(),
+        replies: threadReplies(thread),
+      },
+    ];
+  });
+}
+
+// Resolved findings that someone discussed let the agent avoid re-reporting an
+// issue that was already rejected, without replaying every silently fixed one.
+export function findResolvedJanitorDiscussions(
+  threads: ThreadShape[],
+): ResolvedFindingDiscussion[] {
+  return threads.flatMap((thread) => {
+    const comment = janitorFindingRoot(thread);
+    const replies = threadReplies(thread);
+    if (!thread.isResolved || comment === undefined || replies.length === 0) {
+      return [];
+    }
+    return [
+      {
+        path: thread.path,
+        line: thread.line,
+        originalLine: thread.originalLine,
+        body: comment.body.replace(FINDING_MARKER, "").trim(),
+        replies,
       },
     ];
   });
