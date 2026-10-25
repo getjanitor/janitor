@@ -52,6 +52,11 @@ export interface NewFinding {
   line: number;
 }
 
+export interface FindingReply {
+  author: string | null;
+  body: string;
+}
+
 export interface ExistingFinding {
   threadId: string;
   commentId: number | null;
@@ -60,11 +65,24 @@ export interface ExistingFinding {
   originalLine: number | null;
   isOutdated: boolean;
   body: string;
+  /** Comments posted under the finding, oldest first. */
+  replies: FindingReply[];
+}
+
+/** A resolved Janitor finding whose thread received replies. */
+export interface ResolvedFindingDiscussion {
+  path: string;
+  line: number | null;
+  originalLine: number | null;
+  isOutdated: boolean;
+  body: string;
+  replies: FindingReply[];
 }
 
 export type ExistingFindingDisposition =
   | { threadId: string; status: "still_present" }
-  | { threadId: string; status: "fixed"; reason: string };
+  | { threadId: string; status: "fixed"; reason: string }
+  | { threadId: string; status: "dismissed"; reason: string };
 
 export interface GeneralReview {
   summary: string;
@@ -84,6 +102,7 @@ export interface ReviewAgentInput {
   context: PullRequestContext;
   diff: ReviewDiff;
   previousFindings: ExistingFinding[];
+  resolvedDiscussions: ResolvedFindingDiscussion[];
 }
 
 export interface ReviewUsageDelta {
