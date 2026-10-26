@@ -1,3 +1,12 @@
+## [2.3.0] - 2026-10-25
+
+### 🚀 Features
+
+- Take replies under findings into account
+
+### 🐛 Bug Fixes
+
+- Include outdated flag for resolved discussions
 ## [2.2.0] - 2026-10-24
 
 ### 🚀 Features
