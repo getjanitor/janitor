@@ -1,5 +1,6 @@
 import { Effect, Layer } from "effect";
 import { describe, expect, it, vi } from "vitest";
+import { buildReviewPrompt } from "#/review/agent";
 import type { ReviewConfig } from "#/review/config";
 import { errorMessage, GitError } from "#/review/errors";
 import { collectIncrementalReview, collectReviewDiff } from "#/review/git";
@@ -296,6 +297,12 @@ describe("incremental re-reviews", () => {
     ]);
     expect(result).toMatchObject({ stillOpen: 1, fixed: 2, incrementalFrom: "prev-sha" });
     expect(parseReviewedState(lastBody(client))?.headSha).toBe("head-sha");
+
+    const prompt = buildReviewPrompt(input as ReviewAgentInput);
+    expect(prompt).toContain("incremental re-review");
+    expect(prompt).toContain("prev-sha");
+    expect(prompt).toContain("Old summary");
+    expect(prompt).toContain("since_last_review=true");
   });
 
   it("drops findings outside the incremental scope that bypassed the tool", async () => {

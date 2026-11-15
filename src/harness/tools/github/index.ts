@@ -11,7 +11,7 @@ export function createReviewTools(
 ): { names: string[]; tools: ToolDefinition[] } {
   const tools = [
     createGetReviewDiffTool(input),
-    createReportFindingTool(output),
+    createReportFindingTool(output, input.incremental),
     createDispositionExistingFindingTool(output),
     createSubmitReviewTool(output),
   ];
