@@ -1,3 +1,8 @@
+## [2.4.0] - 2026-11-15
+
+### 🚀 Features
+
+- Support custom model API base URL
 ## [2.3.0] - 2026-10-25
 
 ### 🚀 Features
