@@ -1,3 +1,24 @@
+## [2.5.0] - 2026-11-15
+
+### 🚀 Features
+
+- *(review)* Report model provider failures as ProviderError
+
+### 💼 Other
+
+- *(deps)* Add effect 4.1.4
+
+### 🚜 Refactor
+
+- *(review)* Run the review core on Effect services and typed errors
+
+### 🧪 Testing
+
+- *(review)* Cover typed failures, failure output and agent session release
+
+### ⚙️ Miscellaneous Tasks
+
+- *(format)* Skip the generated changelog in oxfmt
 ## [2.4.0] - 2026-11-15
 
 ### 🚀 Features
