@@ -9,7 +9,7 @@ import {
 } from "@earendil-works/pi-coding-agent";
 import { Effect, Redacted } from "effect";
 import { createReviewTools } from "#/harness/tools/github/index";
-import { AgentError, errorMessage, ModelUnavailable } from "#/review/errors";
+import { AgentError, errorMessage, ModelUnavailable, ProviderError } from "#/review/errors";
 import type {
   ModelReviewResult,
   ReviewAgentBoundary,
@@ -246,10 +246,28 @@ const resolveModel = Effect.fn("janitor.agent.resolve_model")(function* (
   return { model, modelRuntime };
 });
 
+interface FailedResponse {
+  errorMessage?: string;
+}
+
+/** The last assistant response when the provider ended it with an error. */
+function failedResponse(messages: readonly unknown[]): FailedResponse | undefined {
+  const last = messages.findLast(
+    (message): message is { role: "assistant"; stopReason: string; errorMessage?: string } =>
+      typeof message === "object" &&
+      message !== null &&
+      "role" in message &&
+      message.role === "assistant",
+  );
+  return last?.stopReason === "error" ? last : undefined;
+}
+
 interface AgentEventListenerOptions {
   report: (message: string) => void;
   usageReporter: ReviewUsageReporter | undefined;
   pricingAvailable: boolean;
+  /** Called with the attempt count when pi gives up retrying a failed provider request. */
+  onRetriesExhausted: (attempts: number) => void;
 }
 
 /**
@@ -260,6 +278,9 @@ function agentEventListener(options: AgentEventListenerOptions) {
   return (event: AgentSessionEvent): void => {
     const activity = formatAgentActivity(event);
     if (activity !== undefined) options.report(activity);
+    if (event.type === "auto_retry_end" && !event.success) {
+      options.onRetriesExhausted(event.attempt);
+    }
     if (options.usageReporter !== undefined) {
       reportAgentEventUsage(event, options.pricingAvailable, options.usageReporter);
     }
@@ -278,7 +299,7 @@ export class CodingReviewAgent implements ReviewAgentBoundary {
   run(
     input: ReviewAgentInput,
     usageReporter?: ReviewUsageReporter,
-  ): Effect.Effect<ModelReviewResult, ModelUnavailable | AgentError> {
+  ): Effect.Effect<ModelReviewResult, ModelUnavailable | ProviderError | AgentError> {
     const environment = this.#environment;
     const report = this.#report;
     return Effect.gen(function* () {
@@ -311,6 +332,7 @@ export class CodingReviewAgent implements ReviewAgentBoundary {
       });
       yield* agentCall("load_resources", () => resourceLoader.reload());
 
+      let retryAttempts = 0;
       // Released in reverse order: unsubscribe first, then dispose the session.
       const session = yield* Effect.acquireRelease(
         agentCall("create_session", () =>
@@ -329,11 +351,35 @@ export class CodingReviewAgent implements ReviewAgentBoundary {
       );
       yield* Effect.acquireRelease(
         Effect.sync(() =>
-          session.subscribe(agentEventListener({ report, usageReporter, pricingAvailable })),
+          session.subscribe(
+            agentEventListener({
+              report,
+              usageReporter,
+              pricingAvailable,
+              onRetriesExhausted: (attempts) => {
+                retryAttempts = attempts;
+              },
+            }),
+          ),
         ),
         (unsubscribe) => Effect.sync(unsubscribe),
       );
       yield* agentCall("prompt", () => session.prompt(buildReviewPrompt(input)));
+      // pi resolves the prompt even when the provider fails: the failure is recorded on
+      // the last response. A review that was already submitted is kept as it was.
+      const failed = output.general === undefined ? failedResponse(session.messages) : undefined;
+      if (failed !== undefined) {
+        const reason = failed.errorMessage ?? "unknown provider error";
+        return yield* new ProviderError({
+          message:
+            `Model provider ${environment.provider}/${environment.model} failed: ${reason}` +
+            (retryAttempts > 0 ? ` (after ${retryAttempts} retries)` : ""),
+          provider: environment.provider,
+          model: environment.model,
+          reason,
+          retryAttempts,
+        });
+      }
       return output;
     }).pipe(Effect.scoped, Effect.withSpan("janitor.agent.session"));
   }

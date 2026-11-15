@@ -1,5 +1,11 @@
 import type { Effect, Redacted } from "effect";
-import type { AgentError, GitError, GitHubError, ModelUnavailable } from "#/review/errors";
+import type {
+  AgentError,
+  GitError,
+  GitHubError,
+  ModelUnavailable,
+  ProviderError,
+} from "#/review/errors";
 
 export type DiffSide = "LEFT" | "RIGHT";
 
@@ -128,7 +134,7 @@ export interface ReviewAgentBoundary {
   run(
     input: ReviewAgentInput,
     reportUsage?: ReviewUsageReporter,
-  ): Effect.Effect<ModelReviewResult, ModelUnavailable | AgentError>;
+  ): Effect.Effect<ModelReviewResult, ModelUnavailable | ProviderError | AgentError>;
 }
 
 export interface GitCommandBoundary {

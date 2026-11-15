@@ -1,15 +1,16 @@
 import { Effect, Redacted } from "effect";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { CodingReviewAgent } from "#/review/agent";
-import { AgentError, ModelUnavailable } from "#/review/errors";
+import { AgentError, ModelUnavailable, ProviderError } from "#/review/errors";
 import type { ReviewAgentInput, ReviewEnvironment } from "#/review/types";
 
 const pi = vi.hoisted(() => {
   const unsubscribe = vi.fn();
   const session = {
-    subscribe: vi.fn(() => unsubscribe),
+    subscribe: vi.fn((_listener: (event: unknown) => void) => unsubscribe),
     prompt: vi.fn(async (): Promise<void> => undefined),
     dispose: vi.fn(),
+    messages: [] as unknown[],
   };
   const runtime = {
     setRuntimeApiKey: vi.fn(async () => undefined),
@@ -30,7 +31,7 @@ vi.mock(import("@earendil-works/pi-coding-agent"), async (importOriginal) => ({
     async reload() {}
   } as never,
   getAgentDir: () => "/agent",
-  createAgentSession: vi.fn(async () => ({ session: pi.session })) as never,
+  createAgentSession: vi.fn(async () => ({ session: pi.session })),
 }));
 
 const environment: ReviewEnvironment = {
@@ -61,8 +62,36 @@ const input: ReviewAgentInput = {
   resolvedDiscussions: [],
 };
 
+const cleanGeneral = {
+  summary: "The change is focused and no actionable issues were found.",
+  mermaid: "flowchart LR\n  A[Caller] --> B[Changed code]",
+  confidence: 4,
+  confidenceReason: "All changed files and their direct callers were inspected.",
+};
+
+function failedResponse(errorMessage: string) {
+  return { role: "assistant", content: [], stopReason: "error", errorMessage };
+}
+
+/** Lets a prompt mock emit session events and call the agent's custom tools. */
+async function sessionHarness() {
+  const { createAgentSession } = await import("@earendil-works/pi-coding-agent");
+  const options = vi.mocked(createAgentSession).mock.calls.at(-1)?.[0];
+  const listener = pi.session.subscribe.mock.calls.at(-1)?.[0];
+  if (options === undefined || listener === undefined) throw new Error("No session yet");
+  return {
+    emit: listener,
+    submitReview: async () => {
+      const tool = options.customTools?.find((candidate) => candidate.name === "submit_review");
+      if (tool === undefined) throw new Error("Missing submit_review");
+      await tool.execute("call", cleanGeneral as never, undefined, undefined, undefined as never);
+    },
+  };
+}
+
 beforeEach(() => {
   vi.clearAllMocks();
+  pi.session.messages = [];
   pi.session.subscribe.mockImplementation(() => pi.unsubscribe);
   pi.session.prompt.mockImplementation(async () => undefined);
   pi.runtime.getModel.mockImplementation(() => ({
@@ -115,5 +144,58 @@ describe("coding review agent session", () => {
         "Model provider/model is unavailable (catalog refresh failed: provider: 401 Unauthorized; timed out after 15000ms)",
     });
     expect(pi.session.dispose).not.toHaveBeenCalled();
+  });
+
+  it("fails with ProviderError when the provider fails before the review is submitted", async () => {
+    pi.session.prompt.mockImplementationOnce(async () => {
+      const { emit } = await sessionHarness();
+      emit({ type: "auto_retry_end", success: false, attempt: 3, finalError: "529 overloaded" });
+      pi.session.messages = [
+        { role: "user", content: "Review pull request #12" },
+        failedResponse("529 overloaded"),
+      ];
+    });
+
+    const error = await Effect.runPromise(
+      Effect.flip(new CodingReviewAgent(environment).run(input)),
+    );
+
+    expect(error).toBeInstanceOf(ProviderError);
+    expect(error).toMatchObject({
+      message: "Model provider provider/model failed: 529 overloaded (after 3 retries)",
+      provider: "provider",
+      model: "model",
+      reason: "529 overloaded",
+      retryAttempts: 3,
+    });
+    expect(pi.session.dispose).toHaveBeenCalledOnce();
+  });
+
+  it("reports a non-retried provider failure without a retry count", async () => {
+    pi.session.prompt.mockImplementationOnce(async () => {
+      pi.session.messages = [failedResponse("401 invalid x-api-key")];
+    });
+
+    const error = await Effect.runPromise(
+      Effect.flip(new CodingReviewAgent(environment).run(input)),
+    );
+
+    expect(error).toMatchObject({
+      _tag: "ProviderError",
+      message: "Model provider provider/model failed: 401 invalid x-api-key",
+      retryAttempts: 0,
+    });
+  });
+
+  it("keeps a submitted review when a later provider response fails", async () => {
+    pi.session.prompt.mockImplementationOnce(async () => {
+      const { submitReview } = await sessionHarness();
+      await submitReview();
+      pi.session.messages = [failedResponse("connection reset")];
+    });
+
+    const result = await Effect.runPromise(new CodingReviewAgent(environment).run(input));
+
+    expect(result.general).toEqual(cleanGeneral);
   });
 });

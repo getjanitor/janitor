@@ -38,6 +38,20 @@ export class ModelUnavailable extends Data.TaggedError("ModelUnavailable")<{
   readonly cause?: unknown;
 }> {}
 
+/**
+ * The model provider answered with an error (after pi's automatic retries, when the
+ * error was retryable) before the agent submitted its review.
+ */
+export class ProviderError extends Data.TaggedError("ProviderError")<{
+  readonly message: string;
+  readonly provider: string;
+  readonly model: string;
+  /** The provider's error, as pi recorded it on the failed response. */
+  readonly reason: string;
+  /** How many automatic retries pi made before giving up; 0 when it did not retry. */
+  readonly retryAttempts: number;
+}> {}
+
 /** The coding agent session failed while running the review. */
 export class AgentError extends Data.TaggedError("AgentError")<{
   readonly message: string;
@@ -69,6 +83,7 @@ export type ReviewError =
   | GitError
   | GitHubError
   | ModelUnavailable
+  | ProviderError
   | AgentError
   | ModelOutputInvalid
   | CommentTooLarge;
