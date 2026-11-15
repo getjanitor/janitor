@@ -1,78 +1,172 @@
 import { readFile } from "node:fs/promises";
-import { type } from "arktype";
+import { Config, ConfigProvider, Effect, Option, Redacted, Schema } from "effect";
+import { ConfigError, EventError } from "#/review/errors";
 import type { PullRequestContext, ReviewEnvironment } from "#/review/types";
 
-const pullRequestEventSchema = type({
-  repository: { full_name: "string" },
-  pull_request: {
-    number: "number.integer > 0",
-    base: {
-      ref: "string > 0",
-      sha: "string > 0",
-      repo: { full_name: "string > 0" },
-    },
-    head: {
-      ref: "string > 0",
-      sha: "string > 0",
-      repo: { full_name: "string > 0" },
-    },
-  },
+const RepositoryReference = Schema.Struct({
+  ref: Schema.NonEmptyString,
+  sha: Schema.NonEmptyString,
+  repo: Schema.Struct({ full_name: Schema.NonEmptyString }),
 });
 
-function requiredEnvironmentValue(environment: NodeJS.ProcessEnv, name: string): string {
-  const value = environment[name];
-  if (value === undefined || value.length === 0) {
-    throw new Error(`Missing required environment variable ${name}`);
-  }
-  return value;
+const PullRequestEvent = Schema.Struct({
+  repository: Schema.Struct({ full_name: Schema.String }),
+  pull_request: Schema.Struct({
+    number: Schema.Int.check(Schema.isGreaterThan(0)),
+    base: RepositoryReference,
+    head: RepositoryReference,
+  }),
+});
+
+function missingVariable(name: string): ConfigError {
+  return new ConfigError({
+    message: `Missing required environment variable ${name}`,
+    source: name,
+  });
 }
 
-function optionalBaseUrl(environment: NodeJS.ProcessEnv, name: string): string | undefined {
-  const value = environment[name]?.trim();
-  if (value === undefined || value.length === 0) return undefined;
-  let url: URL;
-  try {
-    url = new URL(value);
-  } catch {
-    throw new Error(`Invalid ${name}: ${value} is not a URL`);
-  }
-  if (url.protocol !== "https:" && url.protocol !== "http:") {
-    throw new Error(`Invalid ${name}: expected an http(s) URL`);
-  }
-  return value.replace(/\/+$/u, "");
+function readVariable<A>(name: string, config: Config.Config<A>) {
+  return Config.option(config).pipe(
+    Effect.mapError(
+      (cause) =>
+        new ConfigError({
+          message: `Unable to read environment variable ${name}`,
+          source: name,
+          cause,
+        }),
+    ),
+  );
 }
 
+// An empty value counts as missing, whether or not the provider preserves empty strings.
+function requiredString(name: string): Effect.Effect<string, ConfigError> {
+  return readVariable(name, Config.String(name)).pipe(
+    Effect.flatMap((value) =>
+      Option.isSome(value) && value.value.length > 0
+        ? Effect.succeed(value.value)
+        : Effect.fail(missingVariable(name)),
+    ),
+  );
+}
+
+function requiredSecret(name: string): Effect.Effect<Redacted.Redacted<string>, ConfigError> {
+  return readVariable(name, Config.Redacted(name)).pipe(
+    Effect.flatMap((value) =>
+      Option.isSome(value) && Redacted.value(value.value).length > 0
+        ? Effect.succeed(value.value)
+        : Effect.fail(missingVariable(name)),
+    ),
+  );
+}
+
+function stringWithDefault(name: string, fallback: string): Effect.Effect<string, ConfigError> {
+  return readVariable(name, Config.String(name)).pipe(
+    Effect.map((value) => Option.getOrElse(value, () => fallback)),
+  );
+}
+
+function optionalBaseUrl(name: string): Effect.Effect<string | undefined, ConfigError> {
+  return readVariable(name, Config.String(name)).pipe(
+    Effect.flatMap((option) => {
+      const value = Option.getOrUndefined(option)?.trim();
+      if (value === undefined || value.length === 0) return Effect.succeed(undefined);
+      let url: URL;
+      try {
+        url = new URL(value);
+      } catch (cause) {
+        return Effect.fail(
+          new ConfigError({
+            message: `Invalid ${name}: ${value} is not a URL`,
+            source: name,
+            cause,
+          }),
+        );
+      }
+      if (url.protocol !== "https:" && url.protocol !== "http:") {
+        return Effect.fail(
+          new ConfigError({ message: `Invalid ${name}: expected an http(s) URL`, source: name }),
+        );
+      }
+      return Effect.succeed(value.replace(/\/+$/u, ""));
+    }),
+  );
+}
+
+/**
+ * Reads the review environment from the current `ConfigProvider`. Variables are validated in
+ * declaration order, so the first missing one is the one reported.
+ */
+export const loadReviewEnvironment: Effect.Effect<ReviewEnvironment, ConfigError> = Effect.gen(
+  function* () {
+    return {
+      githubToken: yield* requiredSecret("GITHUB_TOKEN"),
+      githubEventPath: yield* requiredString("GITHUB_EVENT_PATH"),
+      githubRepository: yield* requiredString("GITHUB_REPOSITORY"),
+      githubApiUrl: yield* stringWithDefault("GITHUB_API_URL", "https://api.github.com"),
+      githubGraphqlUrl: yield* stringWithDefault(
+        "GITHUB_GRAPHQL_URL",
+        "https://api.github.com/graphql",
+      ),
+      provider: yield* requiredString("JANITOR_PROVIDER"),
+      providerKey: yield* requiredSecret("JANITOR_PROVIDER_KEY"),
+      model: yield* requiredString("JANITOR_MODEL"),
+      baseUrl: yield* optionalBaseUrl("JANITOR_BASE_URL"),
+    };
+  },
+).pipe(Effect.withSpan("janitor.config.environment"));
+
+/**
+ * A provider over a plain environment record. Empty strings are kept so an empty
+ * `GITHUB_API_URL` behaves as it did before the Effect migration.
+ */
+export function environmentConfigProvider(
+  environment: NodeJS.ProcessEnv = process.env,
+): ConfigProvider.ConfigProvider {
+  return ConfigProvider.fromEnvRecord(environment, { preserveEmptyStrings: true });
+}
+
+/**
+ * Synchronous entry point kept for the public `env` module. It throws the tagged
+ * `ConfigError` on invalid input.
+ */
 export function readReviewEnvironment(
   environment: NodeJS.ProcessEnv = process.env,
 ): ReviewEnvironment {
-  return {
-    githubToken: requiredEnvironmentValue(environment, "GITHUB_TOKEN"),
-    githubEventPath: requiredEnvironmentValue(environment, "GITHUB_EVENT_PATH"),
-    githubRepository: requiredEnvironmentValue(environment, "GITHUB_REPOSITORY"),
-    githubApiUrl: environment.GITHUB_API_URL ?? "https://api.github.com",
-    githubGraphqlUrl: environment.GITHUB_GRAPHQL_URL ?? "https://api.github.com/graphql",
-    provider: requiredEnvironmentValue(environment, "JANITOR_PROVIDER"),
-    providerKey: requiredEnvironmentValue(environment, "JANITOR_PROVIDER_KEY"),
-    model: requiredEnvironmentValue(environment, "JANITOR_MODEL"),
-    baseUrl: optionalBaseUrl(environment, "JANITOR_BASE_URL"),
-  };
+  return Effect.runSync(
+    loadReviewEnvironment.pipe(
+      Effect.provideService(ConfigProvider.ConfigProvider, environmentConfigProvider(environment)),
+    ),
+  );
 }
 
-export async function readPullRequestContext(
+export const readPullRequestContext = Effect.fn("janitor.event.read_pull_request")(function* (
   eventPath: string,
   expectedRepository: string,
-): Promise<PullRequestContext> {
-  let event: unknown;
-  try {
-    event = JSON.parse(await readFile(eventPath, "utf8"));
-  } catch (error) {
-    throw new Error(`Unable to read GitHub pull-request event at ${eventPath}`, { cause: error });
-  }
+) {
+  const event = yield* Effect.tryPromise({
+    try: async (): Promise<unknown> => JSON.parse(await readFile(eventPath, "utf8")),
+    catch: (cause) =>
+      new EventError({
+        message: `Unable to read GitHub pull-request event at ${eventPath}`,
+        path: eventPath,
+        cause,
+      }),
+  });
 
-  const parsed = pullRequestEventSchema.assert(event);
+  const parsed = yield* Schema.decodeUnknownEffect(PullRequestEvent)(event).pipe(
+    Effect.mapError(
+      (cause) =>
+        new EventError({
+          message: `Invalid GitHub pull-request event at ${eventPath}: ${cause.message}`,
+          path: eventPath,
+          cause,
+        }),
+    ),
+  );
+  const fail = (message: string) => Effect.fail(new EventError({ message, path: eventPath }));
   const repository = parsed.repository.full_name;
   if (repository !== expectedRepository) {
-    throw new Error(
+    return yield* fail(
       `GitHub event repository ${repository} does not match GITHUB_REPOSITORY ${expectedRepository}`,
     );
   }
@@ -80,17 +174,17 @@ export async function readPullRequestContext(
     parsed.pull_request.head.repo.full_name !== repository ||
     parsed.pull_request.base.repo.full_name !== repository
   ) {
-    throw new Error(
+    return yield* fail(
       "Janitor only supports pull requests whose head and base are in this repository",
     );
   }
 
   const separator = repository.indexOf("/");
   if (separator <= 0 || separator === repository.length - 1) {
-    throw new Error(`Invalid GitHub repository name: ${repository}`);
+    return yield* fail(`Invalid GitHub repository name: ${repository}`);
   }
 
-  return {
+  const context: PullRequestContext = {
     repository,
     owner: repository.slice(0, separator),
     repo: repository.slice(separator + 1),
@@ -100,4 +194,5 @@ export async function readPullRequestContext(
     headRef: parsed.pull_request.head.ref,
     headSha: parsed.pull_request.head.sha,
   };
-}
+  return context;
+});

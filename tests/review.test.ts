@@ -1,6 +1,7 @@
 import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { Effect, Layer, Redacted } from "effect";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { review } from "#/commands/review";
 import {
@@ -9,8 +10,15 @@ import {
   hasAvailableModelPricing,
   reportAgentEventUsage,
 } from "#/review/agent";
-import { loadReviewConfig, shouldReviewBranch, shouldRunReview } from "#/review/config";
+import {
+  loadReviewConfig,
+  shouldReviewBranch,
+  shouldRunReview,
+  type ReviewConfig,
+} from "#/review/config";
+import { AgentError, errorMessage, GitError } from "#/review/errors";
 import { collectReviewDiff, parseCommentableLines, parseNameStatus } from "#/review/git";
+import { gitHubReviewFromClient } from "#/review/github";
 import {
   FINDING_MARKER,
   GENERAL_REVIEW_MARKER,
@@ -22,6 +30,15 @@ import {
 } from "#/review/markers";
 import { requireValidModelText } from "#/review/model_result";
 import { executeReview } from "#/review/orchestrator";
+import {
+  Environment,
+  GitCommand,
+  GitHubReview,
+  PullRequest,
+  ReviewAgent,
+  ReviewConfigLoader,
+  ReviewReporter,
+} from "#/review/services";
 import {
   MAX_SPEND_ENTRIES,
   appendSpendEntry,
@@ -35,11 +52,12 @@ import {
 import { readPullRequestContext, readReviewEnvironment } from "#/review/runtime";
 import type {
   GitCommandBoundary,
-  GitHubReviewBoundary,
+  GitHubReviewClientShape,
   ModelReviewResult,
   PullRequestContext,
   ReviewAgentBoundary,
-  ReviewEnvironment,
+  ReviewAgentInput,
+  ReviewUsageReporter,
 } from "#/review/types";
 
 const temporaryDirectories: string[] = [];
@@ -61,21 +79,30 @@ async function temporaryDirectory(): Promise<string> {
   return directory;
 }
 
-function reviewGit(path = "src/a.ts"): GitCommandBoundary {
+/** Adapts a Promise-returning fake to the Effect boundary, as `defaultGitCommand` does. */
+function gitFrom(run: (args: string[], cwd: string) => Promise<string>): GitCommandBoundary {
   return {
-    async run(args) {
-      if (args[0] === "rev-parse") return "head-sha\n";
-      if (args[0] === "merge-base") return "merge-sha\n";
-      if (args.includes("--name-status")) return `M\0${path}\0`;
-      if (args.includes("--unified=0")) {
-        return `diff --git a/${path} b/${path}\n--- a/${path}\n+++ b/${path}\n@@ -2 +2 @@\n-old\n+new\n`;
-      }
-      if (args.includes("--unified=20")) {
-        return `diff --git a/${path} b/${path}\n--- a/${path}\n+++ b/${path}\n@@ -1,3 +1,3 @@\n before\n-old\n+new\n after\n`;
-      }
-      throw new Error(`Unexpected git args: ${args.join(" ")}`);
-    },
+    run: (args, cwd) =>
+      Effect.tryPromise({
+        try: () => run(args, cwd),
+        catch: (cause) => new GitError({ message: errorMessage(cause), args, cause }),
+      }),
   };
+}
+
+function reviewGit(path = "src/a.ts"): GitCommandBoundary {
+  return gitFrom(async (args) => {
+    if (args[0] === "rev-parse") return "head-sha\n";
+    if (args[0] === "merge-base") return "merge-sha\n";
+    if (args.includes("--name-status")) return `M\0${path}\0`;
+    if (args.includes("--unified=0")) {
+      return `diff --git a/${path} b/${path}\n--- a/${path}\n+++ b/${path}\n@@ -2 +2 @@\n-old\n+new\n`;
+    }
+    if (args.includes("--unified=20")) {
+      return `diff --git a/${path} b/${path}\n--- a/${path}\n+++ b/${path}\n@@ -1,3 +1,3 @@\n before\n-old\n+new\n after\n`;
+    }
+    throw new Error(`Unexpected git args: ${args.join(" ")}`);
+  });
 }
 
 function githubBoundary(
@@ -84,7 +111,7 @@ function githubBoundary(
     general?: boolean;
     generalBody?: string;
   } = {},
-): GitHubReviewBoundary & Record<string, ReturnType<typeof vi.fn>> {
+): GitHubReviewClientShape & Record<string, ReturnType<typeof vi.fn>> {
   const previous = options.previous ?? false;
   return {
     listGeneralComments: vi.fn(async () =>
@@ -126,8 +153,67 @@ function githubBoundary(
   } as never;
 }
 
-function agent(result: ModelReviewResult): ReviewAgentBoundary {
-  return { run: vi.fn(async () => result) };
+/**
+ * An agent whose run is a Promise-returning mock. Rejections become `AgentError`s,
+ * except an `AgentError` itself, which is failed with unchanged.
+ */
+function promiseAgent(
+  run: (input: ReviewAgentInput, reportUsage?: ReviewUsageReporter) => Promise<ModelReviewResult>,
+): ReviewAgentBoundary & { run: ReturnType<typeof vi.fn> } {
+  return {
+    run: vi.fn((input: ReviewAgentInput, reportUsage?: ReviewUsageReporter) =>
+      Effect.tryPromise({
+        try: () => run(input, reportUsage),
+        catch: (cause) =>
+          cause instanceof AgentError
+            ? cause
+            : new AgentError({ message: errorMessage(cause), cause }),
+      }),
+    ),
+  };
+}
+
+function agent(result: ModelReviewResult) {
+  return promiseAgent(async () => result);
+}
+
+interface ReviewHarness {
+  cwd: string;
+  context: PullRequestContext;
+  git: GitCommandBoundary;
+  github: GitHubReviewClientShape;
+  agent: ReviewAgentBoundary;
+  configLoader?: (cwd: string) => Promise<ReviewConfig>;
+  // Detailed progress, shown only in verbose mode.
+  report?: (message: string) => void;
+  // High-level review phases.
+  step?: (message: string) => void;
+}
+
+/** Test layers for every service `executeReview` needs. */
+function reviewLayers(harness: Omit<ReviewHarness, "cwd">) {
+  const loader = harness.configLoader;
+  return Layer.mergeAll(
+    Layer.succeed(PullRequest)(harness.context),
+    Layer.succeed(GitCommand)(harness.git),
+    Layer.succeed(GitHubReview)(gitHubReviewFromClient(harness.github)),
+    Layer.succeed(ReviewAgent)(harness.agent),
+    loader === undefined
+      ? ReviewConfigLoader.layer
+      : Layer.succeed(ReviewConfigLoader)({
+          load: (cwd) => Effect.promise(() => loader(cwd)),
+        }),
+    Layer.succeed(ReviewReporter)({
+      step: (message) => Effect.sync(() => harness.step?.(message)),
+      detail: (message) => Effect.sync(() => harness.report?.(message)),
+    }),
+  );
+}
+
+function runReview(harness: ReviewHarness) {
+  return Effect.runPromise(
+    executeReview({ cwd: harness.cwd }).pipe(Effect.provide(reviewLayers(harness))),
+  );
 }
 
 const cleanGeneral = {
@@ -138,7 +224,7 @@ const cleanGeneral = {
 };
 
 async function execute(modelResult: ModelReviewResult, github = githubBoundary()) {
-  return executeReview({
+  return runReview({
     cwd: "/repo",
     context,
     git: reviewGit(),
@@ -206,7 +292,9 @@ describe("review runtime and configuration", () => {
       },
     };
     await writeFile(eventPath, JSON.stringify(event));
-    await expect(readPullRequestContext(eventPath, "owner/repo")).resolves.toMatchObject({
+    await expect(
+      Effect.runPromise(readPullRequestContext(eventPath, "owner/repo")),
+    ).resolves.toMatchObject({
       number: 12,
       baseRef: "main",
       headSha: "head",
@@ -214,9 +302,9 @@ describe("review runtime and configuration", () => {
 
     event.pull_request.head.repo.full_name = "fork/repo";
     await writeFile(eventPath, JSON.stringify(event));
-    await expect(readPullRequestContext(eventPath, "owner/repo")).rejects.toThrow(
-      /in this repository/u,
-    );
+    await expect(
+      Effect.runPromise(readPullRequestContext(eventPath, "owner/repo")),
+    ).rejects.toThrow(/in this repository/u);
   });
 
   it("loads tracked globs and treats them as a review gate", async () => {
@@ -225,7 +313,7 @@ describe("review runtime and configuration", () => {
       join(directory, "janitor.toml"),
       'version = "latest"\n[review]\ntracked_paths = ["src/**", ".github/**"]\n',
     );
-    await expect(loadReviewConfig(directory)).resolves.toEqual({
+    await expect(Effect.runPromise(loadReviewConfig(directory))).resolves.toEqual({
       trackedPaths: ["src/**", ".github/**"],
       trackSpend: false,
     });
@@ -251,7 +339,7 @@ describe("review runtime and configuration", () => {
       join(directory, "janitor.toml"),
       'version = "latest"\n[review]\ntracked_paths = ["**"]\nincluded_branches = ["feat/**", "release/**"]\nexcluded_branches = ["release/**"]\n',
     );
-    const config = await loadReviewConfig(directory);
+    const config = await Effect.runPromise(loadReviewConfig(directory));
     expect(config).toMatchObject({
       includedBranches: ["feat/**", "release/**"],
       excludedBranches: ["release/**"],
@@ -273,10 +361,24 @@ describe("review runtime and configuration", () => {
     );
     const reports: string[] = [];
     const report = (message: string) => reports.push(message);
-    const createAgent = vi.fn((_environment: ReviewEnvironment, progress: typeof report) => {
-      expect(progress).toBe(report);
-      return agent({ findings: [], dispositions: [], general: cleanGeneral });
-    });
+    // Built from the live services, as the coding agent layer is: it must see the
+    // validated environment and report through the command's reporter.
+    const createAgent = vi.fn(() => undefined);
+    const agentLayer = Layer.effect(ReviewAgent)(
+      Effect.gen(function* () {
+        createAgent();
+        const environment = yield* Environment;
+        const reporter = yield* ReviewReporter;
+        expect(Redacted.value(environment.providerKey)).toBe("key");
+        const reviewAgent = agent({ findings: [], dispositions: [], general: cleanGeneral });
+        return {
+          run: (input, reportUsage) =>
+            reporter
+              .detail("Agent session started.")
+              .pipe(Effect.andThen(reviewAgent.run(input, reportUsage))),
+        } satisfies ReviewAgentBoundary;
+      }),
+    );
 
     await review(
       { verbose: true },
@@ -290,15 +392,18 @@ describe("review runtime and configuration", () => {
           JANITOR_PROVIDER_KEY: "key",
           JANITOR_MODEL: "model",
         },
-        readContext: async () => context,
-        git: reviewGit(),
-        createAgent,
-        createGitHub: () => githubBoundary(),
+        layers: {
+          pullRequest: Layer.succeed(PullRequest)(context),
+          git: Layer.succeed(GitCommand)(reviewGit()),
+          agent: agentLayer,
+          github: Layer.succeed(GitHubReview)(gitHubReviewFromClient(githubBoundary())),
+        },
         report,
       },
     );
 
     expect(createAgent).toHaveBeenCalledOnce();
+    expect(reports).toContain("Agent session started.");
     expect(reports).toContain("[3/4] Reviewing: running the coding review agent.");
     expect(reports).toContain("Agent output validated successfully.");
     expect(reports.at(-1)).toContain("Janitor review complete:");
@@ -321,10 +426,14 @@ describe("review runtime and configuration", () => {
     const reports: string[] = [];
     const dependencies = {
       cwd: directory,
-      readContext: async () => context,
-      git: reviewGit(),
-      createAgent: () => agent({ findings: [], dispositions: [], general: cleanGeneral }),
-      createGitHub: () => githubBoundary(),
+      layers: {
+        pullRequest: Layer.succeed(PullRequest)(context),
+        git: Layer.succeed(GitCommand)(reviewGit()),
+        agent: Layer.sync(ReviewAgent)(() =>
+          agent({ findings: [], dispositions: [], general: cleanGeneral }),
+        ),
+        github: Layer.sync(GitHubReview)(() => gitHubReviewFromClient(githubBoundary())),
+      },
       report: (message: string) => reports.push(message),
     };
 
@@ -363,10 +472,12 @@ describe("review runtime and configuration", () => {
     await mkdir(directory, { recursive: true });
     const configPath = join(directory, "janitor.toml");
     await writeFile(configPath, "version = 'latest'\n");
-    await expect(loadReviewConfig(directory)).rejects.toThrow(/review must be an object/u);
+    await expect(Effect.runPromise(loadReviewConfig(directory))).rejects.toThrow(
+      /review must be an object/u,
+    );
 
     await writeFile(configPath, "version = 'latest'\n[review]\ntracked_paths = ['']\n");
-    await expect(loadReviewConfig(directory)).rejects.toThrow(
+    await expect(Effect.runPromise(loadReviewConfig(directory))).rejects.toThrow(
       /tracked_paths\[0\] must be non-empty/u,
     );
 
@@ -374,19 +485,23 @@ describe("review runtime and configuration", () => {
       configPath,
       "version = 'latest'\n[review]\ntracked_paths = ['**']\ntrack_spend = 'yes'\n",
     );
-    await expect(loadReviewConfig(directory)).rejects.toThrow(/track_spend must be boolean/u);
+    await expect(Effect.runPromise(loadReviewConfig(directory))).rejects.toThrow(
+      /track_spend must be boolean/u,
+    );
 
     await writeFile(
       configPath,
       "version = 'latest'\n[review]\ntracked_paths = ['**']\nincluded_branches = []\n",
     );
-    await expect(loadReviewConfig(directory)).rejects.toThrow(/included_branches/u);
+    await expect(Effect.runPromise(loadReviewConfig(directory))).rejects.toThrow(
+      /included_branches/u,
+    );
 
     await writeFile(
       configPath,
       "version = 'latest'\n[review]\ntracked_paths = ['**']\nexcluded_branches = ['']\n",
     );
-    await expect(loadReviewConfig(directory)).rejects.toThrow(
+    await expect(Effect.runPromise(loadReviewConfig(directory))).rejects.toThrow(
       /excluded_branches\[0\] must be non-empty/u,
     );
   });
@@ -398,12 +513,16 @@ describe("review runtime and configuration", () => {
       configPath,
       'version = "latest"\n[review]\ntracked_paths = ["**"]\ntrack_spend = true\n',
     );
-    await expect(loadReviewConfig(directory)).resolves.toMatchObject({ trackSpend: true });
+    await expect(Effect.runPromise(loadReviewConfig(directory))).resolves.toMatchObject({
+      trackSpend: true,
+    });
     await writeFile(
       configPath,
       'version = "latest"\n[review]\ntracked_paths = ["**"]\ntrack_spend = false\n',
     );
-    await expect(loadReviewConfig(directory)).resolves.toMatchObject({ trackSpend: false });
+    await expect(Effect.runPromise(loadReviewConfig(directory))).resolves.toMatchObject({
+      trackSpend: false,
+    });
   });
 });
 
@@ -427,7 +546,7 @@ describe("git diff collection", () => {
 
   it("uses the merge base, verifies HEAD, and gathers readable and location patches", async () => {
     const git = reviewGit("src/a.ts");
-    const diff = await collectReviewDiff("/repo", context, git);
+    const diff = await Effect.runPromise(collectReviewDiff("/repo", context, git));
     expect(diff.mergeBase).toBe("merge-sha");
     expect(diff.files[0]?.commentableLines.right.has(2)).toBe(true);
     expect(diff.files[0]?.commentableLines.left.has(2)).toBe(true);
@@ -436,17 +555,15 @@ describe("git diff collection", () => {
 
   it("includes both rename paths so Git preserves rename-aware line locations", async () => {
     const calls: string[][] = [];
-    const git: GitCommandBoundary = {
-      async run(args) {
-        calls.push(args);
-        if (args[0] === "rev-parse") return "head-sha\n";
-        if (args[0] === "merge-base") return "merge-sha\n";
-        if (args.includes("--name-status")) return "R090\0old.ts\0new.ts\0";
-        return "diff --git a/old.ts b/new.ts\n--- a/old.ts\n+++ b/new.ts\n@@ -2 +2 @@\n-old\n+new\n";
-      },
-    };
+    const git = gitFrom(async (args) => {
+      calls.push(args);
+      if (args[0] === "rev-parse") return "head-sha\n";
+      if (args[0] === "merge-base") return "merge-sha\n";
+      if (args.includes("--name-status")) return "R090\0old.ts\0new.ts\0";
+      return "diff --git a/old.ts b/new.ts\n--- a/old.ts\n+++ b/new.ts\n@@ -2 +2 @@\n-old\n+new\n";
+    });
 
-    const diff = await collectReviewDiff("/repo", context, git);
+    const diff = await Effect.runPromise(collectReviewDiff("/repo", context, git));
     expect(diff.files[0]).toMatchObject({
       status: "renamed",
       previousPath: "old.ts",
@@ -462,11 +579,12 @@ describe("git diff collection", () => {
   it("rejects a checkout that is not at the pull-request head", async () => {
     const git = reviewGit();
     const mismatched: GitCommandBoundary = {
-      run: async (args, cwd) => (args[0] === "rev-parse" ? "other-head\n" : git.run(args, cwd)),
+      run: (args, cwd) =>
+        args[0] === "rev-parse" ? Effect.succeed("other-head\n") : git.run(args, cwd),
     };
-    await expect(collectReviewDiff("/repo", context, mismatched)).rejects.toThrow(
-      /does not match/u,
-    );
+    await expect(
+      Effect.runPromise(collectReviewDiff("/repo", context, mismatched)),
+    ).rejects.toThrow(/does not match/u);
   });
 });
 
@@ -770,13 +888,11 @@ describe("review spend accounting", () => {
 describe("review reconciliation", () => {
   it("does not collect or render spend when tracking is disabled", async () => {
     const github = githubBoundary();
-    const reviewAgent: ReviewAgentBoundary = {
-      run: vi.fn(async (_input, reporter) => {
-        expect(reporter).toBeUndefined();
-        return { findings: [], dispositions: [], general: cleanGeneral };
-      }),
-    };
-    await executeReview({
+    const reviewAgent = promiseAgent(async (_input, reporter) => {
+      expect(reporter).toBeUndefined();
+      return { findings: [], dispositions: [], general: cleanGeneral };
+    });
+    await runReview({
       cwd: "/repo",
       context,
       git: reviewGit(),
@@ -792,7 +908,7 @@ describe("review reconciliation", () => {
       completedSpendEntry("old-head", "succeeded", { inputTokens: 10, outputTokens: 4 }),
     ]);
     const github = githubBoundary({ general: true, generalBody: oldBody });
-    await executeReview({
+    await runReview({
       cwd: "/repo",
       context,
       git: reviewGit(),
@@ -818,15 +934,13 @@ describe("review reconciliation", () => {
       general: true,
       generalBody: renderGeneralCommentStatus("running", [prior]),
     });
-    const reviewAgent: ReviewAgentBoundary = {
-      run: vi.fn(async (_input, reporter) => {
-        expect(github.updateGeneralComment.mock.calls[0]?.[1]).toContain("### Spend");
-        reporter?.({ inputTokens: 20, outputTokens: 8, estimatedCostUsd: 0.02 });
-        reporter?.({ inputTokens: 5, outputTokens: 2, estimatedCostUsd: 0.005 });
-        return { findings: [], dispositions: [], general: cleanGeneral };
-      }),
-    };
-    await executeReview({
+    const reviewAgent = promiseAgent(async (_input, reporter) => {
+      expect(github.updateGeneralComment.mock.calls[0]?.[1]).toContain("### Spend");
+      reporter?.({ inputTokens: 20, outputTokens: 8, estimatedCostUsd: 0.02 });
+      reporter?.({ inputTokens: 5, outputTokens: 2, estimatedCostUsd: 0.005 });
+      return { findings: [], dispositions: [], general: cleanGeneral };
+    });
+    await runReview({
       cwd: "/repo",
       context,
       git: reviewGit(),
@@ -847,19 +961,17 @@ describe("review reconciliation", () => {
 
   it("records partial usage for a failed agent run", async () => {
     const github = githubBoundary();
-    const failure = new Error("agent failed after a response");
+    const failure = new AgentError({ message: "agent failed after a response" });
     await expect(
-      executeReview({
+      runReview({
         cwd: "/repo",
         context,
         git: reviewGit(),
         github,
-        agent: {
-          run: vi.fn(async (_input, reporter) => {
-            reporter?.({ inputTokens: 12, outputTokens: 3, estimatedCostUsd: 0.004 });
-            throw failure;
-          }),
-        },
+        agent: promiseAgent(async (_input, reporter) => {
+          reporter?.({ inputTokens: 12, outputTokens: 3, estimatedCostUsd: 0.004 });
+          throw failure;
+        }),
         configLoader: async () => ({ trackedPaths: ["src/**"], trackSpend: true }),
       }),
     ).rejects.toBe(failure);
@@ -877,12 +989,12 @@ describe("review reconciliation", () => {
   it("records zero tokens and unavailable cost when a failed attempt reports no usage", async () => {
     const github = githubBoundary();
     await expect(
-      executeReview({
+      runReview({
         cwd: "/repo",
         context,
         git: reviewGit(),
         github,
-        agent: { run: vi.fn(async () => Promise.reject(new Error("unavailable"))) },
+        agent: promiseAgent(async () => Promise.reject(new Error("unavailable"))),
         configLoader: async () => ({ trackedPaths: ["src/**"], trackSpend: true }),
       }),
     ).rejects.toThrow("unavailable");
@@ -894,19 +1006,17 @@ describe("review reconciliation", () => {
 
   it("creates the canonical progress comment before the agent starts and updates it in place", async () => {
     const github = githubBoundary();
-    const reviewAgent: ReviewAgentBoundary = {
-      run: vi.fn(async () => {
-        expect(github.createGeneralComment).toHaveBeenCalledWith(
-          expect.stringContaining(GENERAL_REVIEW_MARKER),
-        );
-        expect(github.createGeneralComment).toHaveBeenCalledWith(
-          expect.stringContaining("Review in progress"),
-        );
-        return { findings: [], dispositions: [], general: cleanGeneral };
-      }),
-    };
+    const reviewAgent = promiseAgent(async () => {
+      expect(github.createGeneralComment).toHaveBeenCalledWith(
+        expect.stringContaining(GENERAL_REVIEW_MARKER),
+      );
+      expect(github.createGeneralComment).toHaveBeenCalledWith(
+        expect.stringContaining("Review in progress"),
+      );
+      return { findings: [], dispositions: [], general: cleanGeneral };
+    });
 
-    await executeReview({
+    await runReview({
       cwd: "/repo",
       context,
       git: reviewGit(),
@@ -1040,7 +1150,7 @@ describe("review reconciliation", () => {
       line: 2,
     };
 
-    const result = await executeReview({
+    const result = await runReview({
       cwd: "/repo",
       context,
       git: reviewGit(),
@@ -1140,7 +1250,7 @@ describe("review reconciliation", () => {
       line: 2,
     }));
 
-    const result = await executeReview({
+    const result = await runReview({
       cwd: "/repo",
       context,
       git: reviewGit(),
@@ -1255,7 +1365,7 @@ describe("review reconciliation", () => {
       general: cleanGeneral,
     });
 
-    const result = await executeReview({
+    const result = await runReview({
       cwd: "/repo",
       context,
       git: reviewGit(),
@@ -1304,7 +1414,7 @@ describe("review reconciliation", () => {
     github.resolveThread.mockRejectedValueOnce(new Error("Resource not accessible by integration"));
     const messages: string[] = [];
 
-    const result = await executeReview({
+    const result = await runReview({
       cwd: "/repo",
       context,
       git: reviewGit(),
@@ -1340,12 +1450,12 @@ describe("review reconciliation", () => {
     const failure = new Error("agent unavailable");
 
     await expect(
-      executeReview({
+      runReview({
         cwd: "/repo",
         context,
         git: reviewGit(),
         github,
-        agent: { run: vi.fn(async () => Promise.reject(failure)) },
+        agent: promiseAgent(async () => Promise.reject(failure)),
         configLoader: async () => ({ trackedPaths: ["src/**"], trackSpend: false }),
       }),
     ).rejects.toThrow("agent unavailable");
@@ -1432,7 +1542,7 @@ describe("review reconciliation", () => {
   it("skips before GitHub feedback or model access when tracked paths do not match", async () => {
     const github = githubBoundary();
     const reviewAgent = agent({ findings: [], dispositions: [], general: cleanGeneral });
-    const result = await executeReview({
+    const result = await runReview({
       cwd: "/repo",
       context,
       git: reviewGit("docs/a.md"),
@@ -1450,7 +1560,7 @@ describe("review reconciliation", () => {
     const git = reviewGit();
     const gitRun = vi.spyOn(git, "run");
     const reviewAgent = agent({ findings: [], dispositions: [], general: cleanGeneral });
-    const result = await executeReview({
+    const result = await runReview({
       cwd: "/repo",
       context: { ...context, headRef: "brel/release/v2.1.0" },
       git,
@@ -1473,7 +1583,7 @@ describe("review reconciliation", () => {
 
   it("interleaves review steps with detailed lifecycle progress in order", async () => {
     const messages: string[] = [];
-    await executeReview({
+    await runReview({
       cwd: "/repo",
       context,
       git: reviewGit(),
@@ -1501,12 +1611,12 @@ describe("review reconciliation", () => {
   it("names the failing step", async () => {
     const steps: string[] = [];
     await expect(
-      executeReview({
+      runReview({
         cwd: "/repo",
         context,
         git: reviewGit(),
         github: githubBoundary(),
-        agent: { run: vi.fn(async () => Promise.reject(new Error("model down"))) },
+        agent: promiseAgent(async () => Promise.reject(new Error("model down"))),
         configLoader: async () => ({ trackedPaths: ["src/**"], trackSpend: false }),
         step: (message) => steps.push(message),
       }),

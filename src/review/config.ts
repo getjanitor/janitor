@@ -1,8 +1,10 @@
 import { readFile } from "node:fs/promises";
 import { join } from "node:path";
 import { type } from "arktype";
+import { Effect } from "effect";
 import { minimatch } from "minimatch";
 import { parse } from "smol-toml";
+import { ConfigError } from "#/review/errors";
 import type { ChangedFile } from "#/review/types";
 
 export interface ReviewConfig {
@@ -25,28 +27,29 @@ const janitorConfigSchema = type({
   },
 });
 
-export async function loadReviewConfig(cwd: string): Promise<ReviewConfig> {
+export const loadReviewConfig = Effect.fn("janitor.config.load")(function* (cwd: string) {
   const path = join(cwd, "janitor.toml");
-  let document: unknown;
-  try {
-    document = parse(await readFile(path, "utf8"));
-  } catch (error) {
-    throw new Error(`Unable to load ${path}`, { cause: error });
-  }
+  const document = yield* Effect.tryPromise({
+    try: async (): Promise<unknown> => parse(await readFile(path, "utf8")),
+    catch: (cause) => new ConfigError({ message: `Unable to load ${path}`, source: path, cause }),
+  });
 
-  try {
-    const config = janitorConfigSchema.assert(document);
-    return {
-      trackedPaths: config.review.tracked_paths,
-      trackSpend: config.review.track_spend ?? false,
-      includedBranches: config.review.included_branches,
-      excludedBranches: config.review.excluded_branches,
-    };
-  } catch (error) {
-    const reason = error instanceof Error ? error.message : String(error);
-    throw new Error(`Invalid ${path}: ${reason}`, { cause: error });
-  }
-}
+  return yield* Effect.try({
+    try: (): ReviewConfig => {
+      const config = janitorConfigSchema.assert(document);
+      return {
+        trackedPaths: config.review.tracked_paths,
+        trackSpend: config.review.track_spend ?? false,
+        includedBranches: config.review.included_branches,
+        excludedBranches: config.review.excluded_branches,
+      };
+    },
+    catch: (cause) => {
+      const reason = cause instanceof Error ? cause.message : String(cause);
+      return new ConfigError({ message: `Invalid ${path}: ${reason}`, source: path, cause });
+    },
+  });
+});
 
 function matchesAny(value: string, patterns: string[]): boolean {
   return patterns.some((pattern) => minimatch(value, pattern, { dot: true, nonegate: true }));

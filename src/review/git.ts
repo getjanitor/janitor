@@ -1,5 +1,7 @@
 import { execFile } from "node:child_process";
 import { promisify } from "node:util";
+import { Effect } from "effect";
+import { GitError } from "#/review/errors";
 import type {
   ChangedFile,
   ChangedFileStatus,
@@ -11,18 +13,18 @@ import type {
 const execFileAsync = promisify(execFile);
 
 export const defaultGitCommand: GitCommandBoundary = {
-  async run(args, cwd) {
-    try {
-      const { stdout } = await execFileAsync("git", args, {
-        cwd,
-        encoding: "utf8",
-        maxBuffer: 100 * 1024 * 1024,
-      });
-      return stdout;
-    } catch (error) {
-      throw new Error(`git ${args.join(" ")} failed`, { cause: error });
-    }
-  },
+  run: (args, cwd) =>
+    Effect.tryPromise({
+      try: async () => {
+        const { stdout } = await execFileAsync("git", args, {
+          cwd,
+          encoding: "utf8",
+          maxBuffer: 100 * 1024 * 1024,
+        });
+        return stdout;
+      },
+      catch: (cause) => new GitError({ message: `git ${args.join(" ")} failed`, args, cause }),
+    }),
 };
 
 interface NameStatusEntry {
@@ -115,14 +117,14 @@ export function parseCommentableLines(patch: string): {
   return { left, right };
 }
 
-async function patchForPath(
+function patchForPath(
   git: GitCommandBoundary,
   cwd: string,
   mergeBase: string,
   headSha: string,
   paths: string[],
   unified: number,
-): Promise<string> {
+): Effect.Effect<string, GitError> {
   return git.run(
     [
       "diff",
@@ -139,48 +141,75 @@ async function patchForPath(
   );
 }
 
-export async function collectReviewDiff(
+export const collectReviewDiff = Effect.fn("janitor.git.collect_review_diff")(function* (
   cwd: string,
   context: PullRequestContext,
   git: GitCommandBoundary = defaultGitCommand,
-): Promise<ReviewDiff> {
-  const localHead = (await git.run(["rev-parse", "HEAD"], cwd)).trim();
+) {
+  const localHead = (yield* git.run(["rev-parse", "HEAD"], cwd)).trim();
   if (localHead !== context.headSha) {
-    throw new Error(
-      `Checked-out HEAD ${localHead} does not match pull-request head ${context.headSha}`,
-    );
+    return yield* new GitError({
+      message: `Checked-out HEAD ${localHead} does not match pull-request head ${context.headSha}`,
+      args: ["rev-parse", "HEAD"],
+    });
   }
 
-  const mergeBase = (await git.run(["merge-base", context.baseSha, context.headSha], cwd)).trim();
+  const mergeBaseArgs = ["merge-base", context.baseSha, context.headSha];
+  const mergeBase = (yield* git.run(mergeBaseArgs, cwd)).trim();
   if (mergeBase.length === 0) {
-    throw new Error("Unable to determine the pull-request merge base");
+    return yield* new GitError({
+      message: "Unable to determine the pull-request merge base",
+      args: mergeBaseArgs,
+    });
   }
 
-  const nameStatus = await git.run(
-    ["diff", "--find-renames", "--name-status", "-z", mergeBase, context.headSha],
-    cwd,
-  );
-  const entries = parseNameStatus(nameStatus);
-  const files = await Promise.all(
-    entries.map(async (entry): Promise<ChangedFile> => {
+  const nameStatusArgs = [
+    "diff",
+    "--find-renames",
+    "--name-status",
+    "-z",
+    mergeBase,
+    context.headSha,
+  ];
+  const nameStatus = yield* git.run(nameStatusArgs, cwd);
+  const entries = yield* Effect.try({
+    try: () => parseNameStatus(nameStatus),
+    catch: (cause) =>
+      new GitError({
+        message: cause instanceof Error ? cause.message : String(cause),
+        args: nameStatusArgs,
+        cause,
+      }),
+  });
+  const files = yield* Effect.forEach(
+    entries,
+    (entry) => {
       // Supplying both sides preserves Git's rename/copy detection. Restricting a rename
       // to only its new path makes Git render it as an entirely added file, which does not
       // match the line locations accepted by GitHub's pull-request diff API.
       const paths = entry.previousPath ? [entry.previousPath, entry.path] : [entry.path];
-      const [patch, locationPatch] = await Promise.all([
-        patchForPath(git, cwd, mergeBase, context.headSha, paths, 20),
-        patchForPath(git, cwd, mergeBase, context.headSha, paths, 0),
-      ]);
-      return {
-        ...entry,
-        patch,
-        commentableLines: parseCommentableLines(locationPatch),
-      };
-    }),
+      return Effect.all(
+        [
+          patchForPath(git, cwd, mergeBase, context.headSha, paths, 20),
+          patchForPath(git, cwd, mergeBase, context.headSha, paths, 0),
+        ],
+        { concurrency: "unbounded" },
+      ).pipe(
+        Effect.map(
+          ([patch, locationPatch]): ChangedFile => ({
+            ...entry,
+            patch,
+            commentableLines: parseCommentableLines(locationPatch),
+          }),
+        ),
+      );
+    },
+    { concurrency: "unbounded" },
   );
 
-  return { mergeBase, headSha: context.headSha, files };
-}
+  const diff: ReviewDiff = { mergeBase, headSha: context.headSha, files };
+  return diff;
+});
 
 export function isCommentableLocation(
   diff: ReviewDiff,
