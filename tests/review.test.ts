@@ -171,6 +171,29 @@ describe("review runtime and configuration", () => {
     expect(() => readReviewEnvironment({})).toThrow(/GITHUB_TOKEN/u);
   });
 
+  it("reads an optional model base URL override", () => {
+    const required = {
+      GITHUB_TOKEN: "token",
+      GITHUB_EVENT_PATH: "/event.json",
+      GITHUB_REPOSITORY: "owner/repo",
+      JANITOR_PROVIDER: "provider",
+      JANITOR_PROVIDER_KEY: "key",
+      JANITOR_MODEL: "model",
+    };
+    expect(readReviewEnvironment(required).baseUrl).toBeUndefined();
+    expect(readReviewEnvironment({ ...required, JANITOR_BASE_URL: "" }).baseUrl).toBeUndefined();
+    expect(
+      readReviewEnvironment({ ...required, JANITOR_BASE_URL: " https://proxy.example.com/v1/ " })
+        .baseUrl,
+    ).toBe("https://proxy.example.com/v1");
+    expect(() => readReviewEnvironment({ ...required, JANITOR_BASE_URL: "not a url" })).toThrow(
+      /JANITOR_BASE_URL/u,
+    );
+    expect(() =>
+      readReviewEnvironment({ ...required, JANITOR_BASE_URL: "file:///etc/passwd" }),
+    ).toThrow(/http\(s\) URL/u);
+  });
+
   it("reads a same-repository pull request and rejects fork events", async () => {
     const directory = await temporaryDirectory();
     const eventPath = join(directory, "event.json");

@@ -231,6 +231,9 @@ export class CodingReviewAgent implements ReviewAgentBoundary {
         );
       }
     }
+    if (this.#environment.baseUrl !== undefined) {
+      model = { ...model, baseUrl: this.#environment.baseUrl };
+    }
     const pricingAvailable = usageReporter === undefined ? false : hasAvailableModelPricing(model);
 
     const settingsManager = SettingsManager.inMemory({

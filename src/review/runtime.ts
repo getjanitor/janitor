@@ -27,6 +27,21 @@ function requiredEnvironmentValue(environment: NodeJS.ProcessEnv, name: string):
   return value;
 }
 
+function optionalBaseUrl(environment: NodeJS.ProcessEnv, name: string): string | undefined {
+  const value = environment[name]?.trim();
+  if (value === undefined || value.length === 0) return undefined;
+  let url: URL;
+  try {
+    url = new URL(value);
+  } catch {
+    throw new Error(`Invalid ${name}: ${value} is not a URL`);
+  }
+  if (url.protocol !== "https:" && url.protocol !== "http:") {
+    throw new Error(`Invalid ${name}: expected an http(s) URL`);
+  }
+  return value.replace(/\/+$/u, "");
+}
+
 export function readReviewEnvironment(
   environment: NodeJS.ProcessEnv = process.env,
 ): ReviewEnvironment {
@@ -39,6 +54,7 @@ export function readReviewEnvironment(
     provider: requiredEnvironmentValue(environment, "JANITOR_PROVIDER"),
     providerKey: requiredEnvironmentValue(environment, "JANITOR_PROVIDER_KEY"),
     model: requiredEnvironmentValue(environment, "JANITOR_MODEL"),
+    baseUrl: optionalBaseUrl(environment, "JANITOR_BASE_URL"),
   };
 }
 

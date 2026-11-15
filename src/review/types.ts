@@ -20,6 +20,8 @@ export interface ReviewEnvironment {
   provider: string;
   providerKey: string;
   model: string;
+  /** Overrides the provider's default API endpoint, e.g. for a proxy or gateway. */
+  baseUrl?: string;
 }
 
 export type ChangedFileStatus = "added" | "copied" | "deleted" | "modified" | "renamed";
