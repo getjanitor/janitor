@@ -504,6 +504,29 @@ describe("review runtime and configuration", () => {
     await expect(Effect.runPromise(loadReviewConfig(directory))).rejects.toThrow(
       /excluded_branches\[0\] must be non-empty/u,
     );
+
+    await writeFile(
+      configPath,
+      "version = 'latest'\n[review]\ntracked_paths = ['**']\nthinking_level = 'extreme'\n",
+    );
+    await expect(Effect.runPromise(loadReviewConfig(directory))).rejects.toThrow(
+      /thinking_level must be/u,
+    );
+  });
+
+  it("loads an explicit thinking level and leaves it unset by default", async () => {
+    const directory = await temporaryDirectory();
+    const configPath = join(directory, "janitor.toml");
+    await writeFile(
+      configPath,
+      'version = "latest"\n[review]\ntracked_paths = ["**"]\nthinking_level = "high"\n',
+    );
+    await expect(Effect.runPromise(loadReviewConfig(directory))).resolves.toMatchObject({
+      thinkingLevel: "high",
+    });
+    await writeFile(configPath, 'version = "latest"\n[review]\ntracked_paths = ["**"]\n');
+    const config = await Effect.runPromise(loadReviewConfig(directory));
+    expect(config.thinkingLevel).toBeUndefined();
   });
 
   it("loads explicit spend tracking settings", async () => {
@@ -901,6 +924,26 @@ describe("review reconciliation", () => {
       configLoader: async () => ({ trackedPaths: ["src/**"], trackSpend: false }),
     });
     expect(github.updateGeneralComment.mock.calls.at(-1)?.[1]).not.toContain("### Spend");
+  });
+
+  it("hands the configured thinking level to the review agent", async () => {
+    const reviewAgent = agent({ findings: [], dispositions: [], general: cleanGeneral });
+    await runReview({
+      cwd: "/repo",
+      context,
+      git: reviewGit(),
+      github: githubBoundary(),
+      agent: reviewAgent,
+      configLoader: async () => ({
+        trackedPaths: ["src/**"],
+        trackSpend: false,
+        thinkingLevel: "xhigh",
+      }),
+    });
+    expect(reviewAgent.run).toHaveBeenCalledWith(
+      expect.objectContaining({ thinkingLevel: "xhigh" }),
+      undefined,
+    );
   });
 
   it("removes an old spend ledger when tracking is disabled", async () => {

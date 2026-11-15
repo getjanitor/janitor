@@ -340,6 +340,7 @@ export class CodingReviewAgent implements ReviewAgentBoundary {
             cwd: input.cwd,
             model,
             modelRuntime,
+            thinkingLevel: input.thinkingLevel,
             settingsManager,
             resourceLoader,
             sessionManager: SessionManager.inMemory(input.cwd),

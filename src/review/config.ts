@@ -5,7 +5,7 @@ import { Effect } from "effect";
 import { minimatch } from "minimatch";
 import { parse } from "smol-toml";
 import { ConfigError } from "#/review/errors";
-import type { ChangedFile } from "#/review/types";
+import { THINKING_LEVELS, type ChangedFile, type ThinkingLevel } from "#/review/types";
 
 export interface ReviewConfig {
   trackedPaths: string[];
@@ -14,6 +14,8 @@ export interface ReviewConfig {
   includedBranches?: string[];
   /** Pull requests whose head branch matches one of these globs are never reviewed. */
   excludedBranches?: string[];
+  /** Model reasoning effort; omitted means the agent library's default. */
+  thinkingLevel?: ThinkingLevel;
 }
 
 const nonEmptyString = type("string > 0");
@@ -24,6 +26,7 @@ const janitorConfigSchema = type({
     "track_spend?": "boolean",
     "included_branches?": nonEmptyString.array().atLeastLength(1),
     "excluded_branches?": nonEmptyString.array(),
+    "thinking_level?": type.enumerated(...THINKING_LEVELS),
   },
 });
 
@@ -42,6 +45,7 @@ export const loadReviewConfig = Effect.fn("janitor.config.load")(function* (cwd:
         trackSpend: config.review.track_spend ?? false,
         includedBranches: config.review.included_branches,
         excludedBranches: config.review.excluded_branches,
+        thinkingLevel: config.review.thinking_level,
       };
     },
     catch: (cause) => {

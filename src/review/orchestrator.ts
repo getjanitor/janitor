@@ -45,6 +45,7 @@ import type {
   ResolvedFindingDiscussion,
   ReviewDiff,
   ReviewSpendEntry,
+  ThinkingLevel,
 } from "#/review/types";
 
 const GITHUB_COMMENT_LIMIT = 65_536;
@@ -221,6 +222,7 @@ const initialize = Effect.fn("janitor.review.initialize")(function* (
   yield* Effect.annotateCurrentSpan({
     "janitor.config.track_spend": config.trackSpend,
     "janitor.config.tracked_paths": config.trackedPaths.length,
+    "janitor.config.thinking_level": config.thinkingLevel ?? "default",
   });
   return config;
 });
@@ -352,6 +354,7 @@ const runAgent = Effect.fn("janitor.review.run_agent")(function* (
   diff: ReviewDiff,
   feedback: PreviousFeedback,
   usage: ReviewUsageAccumulator | undefined,
+  thinkingLevel: ThinkingLevel | undefined,
 ) {
   const reporter = yield* ReviewReporter;
   const agent = yield* ReviewAgent;
@@ -359,6 +362,7 @@ const runAgent = Effect.fn("janitor.review.run_agent")(function* (
   const result = yield* agent.run(
     {
       cwd,
+      thinkingLevel,
       context,
       diff,
       previousFindings: feedback.previousFindings,
@@ -562,6 +566,7 @@ const reviewAndPublish = Effect.fnUntraced(function* (
     diff,
     feedback,
     trackSpend ? usage : undefined,
+    config.thinkingLevel,
   ).pipe(withinStep("review"));
   const validated = yield* validateModelResult(modelResult, feedback.previousFindings).pipe(
     withinStep("review"),
