@@ -92,7 +92,7 @@ export function reviewLayer(
 function summarize(result: ExecuteReviewResult): string {
   return result.skipped
     ? `Janitor review skipped: ${result.skipReason ?? "no review was needed."}`
-    : `Janitor review complete: ${result.newFindings} new, ${result.stillOpen} still open, ${result.fixed} fixed, ${result.dismissed} dismissed.`;
+    : `Janitor review complete: ${result.newFindings} new, ${result.stillOpen} still open, ${result.fixed} fixed, ${result.dismissed} dismissed.${result.incrementalFrom === undefined ? "" : ` Reviewed changes since ${result.incrementalFrom}.`}`;
 }
 
 /**

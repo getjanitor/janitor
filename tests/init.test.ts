@@ -78,6 +78,10 @@ version = "next"
 # Append per-run model token usage and estimated cost to the main review comment.
 track_spend = false
 
+# Re-review only what changed since Janitor's last successful review of the pull request.
+# Set to false to review the full diff on every run.
+# incremental = true
+
 # Run a review when at least one changed path matches one of these glob patterns.
 tracked_paths = [
   "src/**",

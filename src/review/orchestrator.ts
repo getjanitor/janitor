@@ -6,7 +6,12 @@ import {
   ModelOutputInvalid,
   type ReviewError,
 } from "#/review/errors";
-import { collectReviewDiff, isCommentableLocation } from "#/review/git";
+import {
+  collectIncrementalReview,
+  collectReviewDiff,
+  isCommentableLocation,
+  isIncrementalLocation,
+} from "#/review/git";
 import {
   findJanitorGeneralComment,
   findOpenJanitorFindings,
@@ -18,6 +23,7 @@ import {
   type GeneralCommentFinding,
 } from "#/review/markers";
 import { modelTextProblem } from "#/review/model_result";
+import { parseReviewedState } from "#/review/reviewed_state";
 import {
   GitCommand,
   GitHubReview,
@@ -39,11 +45,13 @@ import type {
   ExistingGeneralComment,
   ExistingFindingDisposition,
   GeneralReview,
+  IncrementalReview,
   ModelReviewResult,
   NewFinding,
   PullRequestContext,
   ResolvedFindingDiscussion,
   ReviewDiff,
+  ReviewedState,
   ReviewSpendEntry,
   ThinkingLevel,
 } from "#/review/types";
@@ -76,6 +84,8 @@ export interface ExecuteReviewResult {
   stillOpen: number;
   fixed: number;
   dismissed: number;
+  /** The commit an incremental review started from; unset for a full review. */
+  incrementalFrom?: string;
 }
 
 /** Everything `executeReview` needs; a hosted mode supplies its own layers for these. */
@@ -248,6 +258,8 @@ interface PreviousFeedback {
   spendHistory: ReviewSpendEntry[];
   previousFindings: ExistingFinding[];
   resolvedDiscussions: ResolvedFindingDiscussion[];
+  /** The last successful review, carried through running and failed states. */
+  reviewed: ReviewedState | undefined;
 }
 
 const loadPreviousFeedback = Effect.fn("janitor.review.load_previous_feedback")(function* (
@@ -281,6 +293,7 @@ const loadPreviousFeedback = Effect.fn("janitor.review.load_previous_feedback")(
       trackSpend && generalComment !== undefined ? parseSpendHistory(generalComment.body) : [],
     previousFindings,
     resolvedDiscussions,
+    reviewed: generalComment === undefined ? undefined : parseReviewedState(generalComment.body),
   };
   return feedback;
 });
@@ -288,10 +301,11 @@ const loadPreviousFeedback = Effect.fn("janitor.review.load_previous_feedback")(
 const setCommentRunning = Effect.fn("janitor.review.set_comment_running")(function* (
   generalComment: ExistingGeneralComment | undefined,
   spendHistory: readonly ReviewSpendEntry[] | undefined,
+  reviewed: ReviewedState | undefined,
 ) {
   const reporter = yield* ReviewReporter;
   const github = yield* GitHubReview;
-  const body = renderGeneralCommentStatus("running", spendHistory);
+  const body = renderGeneralCommentStatus("running", spendHistory, reviewed);
   let commentId: number;
   if (generalComment === undefined) {
     commentId = yield* github.createGeneralComment(body);
@@ -317,6 +331,7 @@ function markCommentFailed(
   trackSpend: boolean,
   spendHistory: readonly ReviewSpendEntry[],
   usage: ReviewUsageAccumulator | undefined,
+  reviewed: ReviewedState | undefined,
 ): Effect.Effect<void, never, GitHubReview | ReviewReporter> {
   return Effect.gen(function* () {
     const reporter = yield* ReviewReporter;
@@ -330,7 +345,8 @@ function markCommentFailed(
         : spendHistory;
     const { body } = trimSpendHistoryToFit(
       trackSpend ? history : [],
-      (retained) => renderGeneralCommentStatus("failed", trackSpend ? retained : undefined),
+      (retained) =>
+        renderGeneralCommentStatus("failed", trackSpend ? retained : undefined, reviewed),
       GITHUB_COMMENT_LIMIT,
     );
     yield* github.updateGeneralComment(commentId, body).pipe(
@@ -348,11 +364,93 @@ function markCommentFailed(
   );
 }
 
+/** What one review run covers. */
+interface ReviewScope {
+  /** Set for an incremental review; unset reviews the whole pull request. */
+  incremental: IncrementalReview | undefined;
+  /** Unresolved findings the agent re-evaluates. */
+  agentFindings: ExistingFinding[];
+  /** Unresolved findings kept open without the agent, because nothing about them changed. */
+  carriedFindings: ExistingFinding[];
+}
+
+type ReviewPlan = { kind: "skip"; reason: string } | { kind: "review"; scope: ReviewScope };
+
+function fullScope(feedback: PreviousFeedback): ReviewScope {
+  return { incremental: undefined, agentFindings: feedback.previousFindings, carriedFindings: [] };
+}
+
+/**
+ * A finding needs the agent when its file changed since the last review, or when it
+ * has replies: participants dispute findings by replying, whatever changed in the code.
+ */
+function needsReevaluation(finding: ExistingFinding, incremental: IncrementalReview): boolean {
+  return (
+    finding.replies.length > 0 ||
+    incremental.files.some(
+      (file) => file.path === finding.path || file.previousPath === finding.path,
+    )
+  );
+}
+
+const planReview = Effect.fn("janitor.review.plan")(function* (
+  cwd: string,
+  config: ReviewConfig,
+  diff: ReviewDiff,
+  feedback: PreviousFeedback,
+) {
+  const reporter = yield* ReviewReporter;
+  const git = yield* GitCommand;
+  const full = (reason: string) =>
+    Effect.annotateCurrentSpan("janitor.review.mode", "full").pipe(
+      Effect.andThen(reporter.detail(`Reviewing the whole pull request: ${reason}`)),
+      Effect.as<ReviewPlan>({ kind: "review", scope: fullScope(feedback) }),
+    );
+
+  if (config.incremental === false) return yield* full("review.incremental is disabled.");
+  const previous = feedback.reviewed;
+  if (previous === undefined) return yield* full("no previous successful Janitor review.");
+  if (previous.headSha === diff.headSha) {
+    return { kind: "skip", reason: `head ${diff.headSha} was already reviewed.` } as ReviewPlan;
+  }
+
+  const collected = yield* collectIncrementalReview(cwd, diff, previous, git);
+  if ("fallback" in collected) return yield* full(collected.fallback);
+  if (collected.files.length === 0) {
+    return {
+      kind: "skip",
+      reason: `no pull-request file changed since the last review at ${previous.headSha}.`,
+    } as ReviewPlan;
+  }
+
+  const agentFindings = feedback.previousFindings.filter((finding) =>
+    needsReevaluation(finding, collected),
+  );
+  const carriedFindings = feedback.previousFindings.filter(
+    (finding) => !agentFindings.includes(finding),
+  );
+  yield* Effect.annotateCurrentSpan({
+    "janitor.review.mode": "incremental",
+    "janitor.review.incremental_from": previous.headSha,
+    "janitor.review.incremental_files": collected.files.length,
+    "janitor.review.carried_findings": carriedFindings.length,
+  });
+  yield* reporter.detail(
+    `Reviewing incrementally since ${previous.headSha}: ${collected.files.length} file(s) changed; ${carriedFindings.length} unaffected finding(s) kept open without re-evaluation.`,
+  );
+  const plan: ReviewPlan = {
+    kind: "review",
+    scope: { incremental: collected, agentFindings, carriedFindings },
+  };
+  return plan;
+});
+
 const runAgent = Effect.fn("janitor.review.run_agent")(function* (
   cwd: string,
   context: PullRequestContext,
   diff: ReviewDiff,
   feedback: PreviousFeedback,
+  scope: ReviewScope,
   usage: ReviewUsageAccumulator | undefined,
   thinkingLevel: ThinkingLevel | undefined,
 ) {
@@ -365,7 +463,8 @@ const runAgent = Effect.fn("janitor.review.run_agent")(function* (
       thinkingLevel,
       context,
       diff,
-      previousFindings: feedback.previousFindings,
+      ...(scope.incremental === undefined ? {} : { incremental: scope.incremental }),
+      previousFindings: scope.agentFindings,
       resolvedDiscussions: feedback.resolvedDiscussions,
     },
     usage?.report,
@@ -409,34 +508,40 @@ function generalCommentRenderer(
   groups: DispositionGroups,
   spendHistory: readonly ReviewSpendEntry[],
   trackSpend: boolean,
+  reviewed: ReviewedState,
 ) {
+  // The carried summary and diagram only improve the next re-review, so they are
+  // dropped before any visible content; the reviewed commit itself is always kept.
+  const reviewedVariants: ReviewedState[] = [reviewed, { headSha: reviewed.headSha }];
   return (
     listed: readonly GeneralCommentFinding[],
     outsideDiff: readonly NewFinding[],
     unresolved: UnresolvedCounts,
     details: readonly OutsideDiffDetail[] = ["full", "compact", "count"],
   ): Effect.Effect<{ body: string; detail: OutsideDiffDetail }, CommentTooLarge> => {
-    for (const detail of details) {
-      const { body } = trimSpendHistoryToFit(
-        spendHistory,
-        (retained) =>
-          renderGeneralComment(
-            general,
-            listed,
-            {
-              stillOpen: groups.stillOpen.length,
-              fixed: groups.fixed.length - unresolved.fixed,
-              dismissed: groups.dismissed.length - unresolved.dismissed,
-              unresolvedFixed: unresolved.fixed,
-              unresolvedDismissed: unresolved.dismissed,
-            },
-            trackSpend ? retained : undefined,
-            renderOutsideDiffFindings(outsideDiff, detail),
-          ),
-        GITHUB_COMMENT_LIMIT,
-      );
-      if (body.length <= GITHUB_COMMENT_LIMIT) return Effect.succeed({ body, detail });
-    }
+    for (const detail of details)
+      for (const reviewedVariant of reviewedVariants) {
+        const { body } = trimSpendHistoryToFit(
+          spendHistory,
+          (retained) =>
+            renderGeneralComment(
+              general,
+              listed,
+              {
+                stillOpen: groups.stillOpen.length,
+                fixed: groups.fixed.length - unresolved.fixed,
+                dismissed: groups.dismissed.length - unresolved.dismissed,
+                unresolvedFixed: unresolved.fixed,
+                unresolvedDismissed: unresolved.dismissed,
+              },
+              trackSpend ? retained : undefined,
+              renderOutsideDiffFindings(outsideDiff, detail),
+              reviewedVariant,
+            ),
+          GITHUB_COMMENT_LIMIT,
+        );
+        if (body.length <= GITHUB_COMMENT_LIMIT) return Effect.succeed({ body, detail });
+      }
     return Effect.fail(new CommentTooLarge({ limit: GITHUB_COMMENT_LIMIT }));
   };
 }
@@ -555,6 +660,7 @@ const reviewAndPublish = Effect.fnUntraced(function* (
   config: ReviewConfig,
   diff: ReviewDiff,
   feedback: PreviousFeedback,
+  scope: ReviewScope,
   commentId: number,
   usage: ReviewUsageAccumulator,
 ) {
@@ -565,12 +671,42 @@ const reviewAndPublish = Effect.fnUntraced(function* (
     context,
     diff,
     feedback,
+    scope,
     trackSpend ? usage : undefined,
     config.thinkingLevel,
   ).pipe(withinStep("review"));
-  const validated = yield* validateModelResult(modelResult, feedback.previousFindings).pipe(
+  const checked = yield* validateModelResult(modelResult, scope.agentFindings).pipe(
     withinStep("review"),
   );
+
+  // report_finding already rejects these, so this only guards against a tool bypass.
+  const incremental = scope.incremental;
+  const findings: NewFinding[] = [];
+  for (const finding of checked.findings) {
+    if (
+      incremental === undefined ||
+      isIncrementalLocation(incremental, finding.path, finding.side, finding.line)
+    ) {
+      findings.push(finding);
+    } else {
+      yield* reporter.detail(
+        `Dropping finding at ${finding.path}:${finding.line} (${finding.side}): it is not on a line changed since ${incremental.previous.headSha}.`,
+      );
+    }
+  }
+  const validated: ValidatedModelResult = {
+    ...checked,
+    findings,
+    dispositions: [
+      ...checked.dispositions,
+      ...scope.carriedFindings.map(
+        (finding): ExistingFindingDisposition => ({
+          threadId: finding.threadId,
+          status: "still_present",
+        }),
+      ),
+    ],
+  };
 
   const inlineFindings: NewFinding[] = [];
   const outsideDiffFindings: NewFinding[] = [];
@@ -611,6 +747,11 @@ const reviewAndPublish = Effect.fnUntraced(function* (
     groups,
     successfulSpendHistory,
     trackSpend,
+    {
+      headSha: context.headSha,
+      summary: validated.general.summary,
+      mermaid: validated.general.mermaid,
+    },
   );
   // Fail before any GitHub mutation unless the worst case fits: every finding
   // folded after a 422, every fixed or dismissed thread left unresolved, and no comment
@@ -646,6 +787,7 @@ const reviewAndPublish = Effect.fnUntraced(function* (
     stillOpen: groups.stillOpen.length,
     fixed: groups.fixed.length,
     dismissed: groups.dismissed.length,
+    ...(incremental === undefined ? {} : { incrementalFrom: incremental.previous.headSha }),
   };
   return result;
 });
@@ -678,13 +820,27 @@ export const executeReview: (
     }
 
     const feedback = yield* loadPreviousFeedback(config.trackSpend).pipe(withinStep("context"));
+    const plan = yield* planReview(options.cwd, config, diff, feedback).pipe(withinStep("context"));
+    if (plan.kind === "skip") {
+      yield* reporter.detail(`Skipping agent review: ${plan.reason}`);
+      return skippedResult(plan.reason);
+    }
+
     const markFailed = (commentId: number, usage: ReviewUsageAccumulator | undefined) => () =>
-      markCommentFailed(commentId, context, config.trackSpend, feedback.spendHistory, usage);
+      markCommentFailed(
+        commentId,
+        context,
+        config.trackSpend,
+        feedback.spendHistory,
+        usage,
+        feedback.reviewed,
+      );
 
     const existing = feedback.generalComment;
     const running = setCommentRunning(
       existing,
       config.trackSpend ? feedback.spendHistory : undefined,
+      feedback.reviewed,
     ).pipe(withinStep("context"));
     // An existing comment may already show "running" when that update fails, so it is
     // marked failed too. A comment that could not be created has nothing to update.
@@ -699,6 +855,7 @@ export const executeReview: (
       config,
       diff,
       feedback,
+      plan.scope,
       commentId,
       usage,
     ).pipe(Effect.onError(markFailed(commentId, usage)));

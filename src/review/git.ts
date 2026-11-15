@@ -6,8 +6,11 @@ import type {
   ChangedFile,
   ChangedFileStatus,
   GitCommandBoundary,
+  IncrementalFile,
+  IncrementalReview,
   PullRequestContext,
   ReviewDiff,
+  ReviewedState,
 } from "#/review/types";
 
 const execFileAsync = promisify(execFile);
@@ -120,7 +123,7 @@ export function parseCommentableLines(patch: string): {
 function patchForPath(
   git: GitCommandBoundary,
   cwd: string,
-  mergeBase: string,
+  fromSha: string,
   headSha: string,
   paths: string[],
   unified: number,
@@ -132,7 +135,7 @@ function patchForPath(
       "--no-ext-diff",
       "--no-color",
       `--unified=${unified}`,
-      mergeBase,
+      fromSha,
       headSha,
       "--",
       ...paths,
@@ -210,6 +213,90 @@ export const collectReviewDiff = Effect.fn("janitor.git.collect_review_diff")(fu
   const diff: ReviewDiff = { mergeBase, headSha: context.headSha, files };
   return diff;
 });
+
+/** Why an incremental review was not possible, so the whole pull request is reviewed. */
+export interface FullReviewFallback {
+  fallback: string;
+}
+
+/**
+ * Narrows a re-review to the pull-request files whose content changed since
+ * `previous.headSha`. Changes outside the pull-request diff, such as those brought in
+ * by merging the base branch, are left out because only pull-request files are
+ * compared and only lines that are also part of the pull-request diff are kept.
+ */
+export const collectIncrementalReview = Effect.fn("janitor.git.collect_incremental_review")(
+  function* (
+    cwd: string,
+    diff: ReviewDiff,
+    previous: ReviewedState,
+    git: GitCommandBoundary = defaultGitCommand,
+  ) {
+    // Exits non-zero when the commit is unknown (e.g. a shallow clone) or was rewritten
+    // away by a force-push or rebase. Either way the previous review no longer anchors
+    // cleanly onto head, so the whole pull request is reviewed again.
+    const ancestor = yield* git
+      .run(["merge-base", "--is-ancestor", previous.headSha, diff.headSha], cwd)
+      .pipe(
+        Effect.as(true),
+        Effect.catchTag("GitError", () => Effect.succeed(false)),
+      );
+    if (!ancestor) {
+      const fallback: FullReviewFallback = {
+        fallback: `last reviewed commit ${previous.headSha} is not an ancestor of head (force-push, rebase, or missing history).`,
+      };
+      return fallback;
+    }
+
+    const files = yield* Effect.forEach(
+      diff.files,
+      (file) => {
+        const paths = file.previousPath ? [file.previousPath, file.path] : [file.path];
+        return Effect.all(
+          [
+            patchForPath(git, cwd, previous.headSha, diff.headSha, paths, 20),
+            patchForPath(git, cwd, previous.headSha, diff.headSha, paths, 0),
+          ],
+          { concurrency: "unbounded" },
+        ).pipe(
+          Effect.map(([patch, locationPatch]): IncrementalFile | undefined => {
+            if (patch.trim().length === 0) return undefined;
+            const changed = parseCommentableLines(locationPatch).right;
+            const rightLines = new Set(
+              [...changed].filter((line) => file.commentableLines.right.has(line)),
+            );
+            return {
+              path: file.path,
+              ...(file.previousPath ? { previousPath: file.previousPath } : {}),
+              patch,
+              rightLines,
+            };
+          }),
+        );
+      },
+      { concurrency: "unbounded" },
+    );
+    const incremental: IncrementalReview = {
+      previous,
+      files: files.filter((file): file is IncrementalFile => file !== undefined),
+    };
+    return incremental;
+  },
+);
+
+/** Whether an incremental review covers this location: any changed line of a changed file. */
+export function isIncrementalLocation(
+  incremental: IncrementalReview,
+  path: string,
+  side: "LEFT" | "RIGHT",
+  line: number,
+): boolean {
+  const file = incremental.files.find((candidate) => candidate.path === path);
+  if (file === undefined) return false;
+  // Deleted lines are numbered against the merge base, which the last reviewed commit
+  // cannot map onto, so any deleted line of a changed file stays in scope.
+  return side === "LEFT" || file.rightLines.has(line);
+}
 
 export function isCommentableLocation(
   diff: ReviewDiff,
