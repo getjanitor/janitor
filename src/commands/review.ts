@@ -1,16 +1,23 @@
 import { cli, type CliOptions } from "cleye";
-import { CodingReviewAgent } from "#/review/agent";
-import { defaultGitCommand } from "#/review/git";
-import { GitHubReviewClient } from "#/review/github";
-import { executeReview, type ExecuteReviewResult } from "#/review/orchestrator";
-import { readPullRequestContext, readReviewEnvironment } from "#/review/runtime";
-import type {
-  GitCommandBoundary,
-  GitHubReviewBoundary,
-  PullRequestContext,
-  ReviewAgentBoundary,
-  ReviewEnvironment,
-} from "#/review/types";
+import { Cause, ConfigProvider, Effect, Exit, Layer } from "effect";
+import type { ConfigError, EventError } from "#/review/errors";
+import { formatReviewFailure } from "#/review/failure";
+import {
+  executeReview,
+  type ExecuteReviewResult,
+  type ReviewServices,
+} from "#/review/orchestrator";
+import { environmentConfigProvider } from "#/review/runtime";
+import {
+  Environment,
+  GitCommand,
+  GitHubReview,
+  PullRequest,
+  ReviewAgent,
+  ReviewConfigLoader,
+  ReviewReporter,
+  type ReviewReporterOptions,
+} from "#/review/services";
 
 export const reviewCliOptions = {
   help: {
@@ -34,69 +41,107 @@ export interface ReviewOptions {
   quiet?: boolean;
 }
 
+/**
+ * The replaceable parts of the review stack. Each one defaults to its live layer;
+ * tests and a hosted mode can supply their own.
+ */
+export interface ReviewLayers {
+  pullRequest: Layer.Layer<PullRequest, EventError | ConfigError, Environment>;
+  git: Layer.Layer<GitCommand, never, Environment>;
+  github: Layer.Layer<GitHubReview, never, Environment | PullRequest>;
+  agent: Layer.Layer<ReviewAgent, never, Environment | ReviewReporter>;
+  config: Layer.Layer<ReviewConfigLoader>;
+}
+
 export interface ReviewDependencies {
   cwd?: string;
   environment?: NodeJS.ProcessEnv;
-  git?: GitCommandBoundary;
-  readContext?: (eventPath: string, repository: string) => Promise<PullRequestContext>;
-  createAgent?: (
-    environment: ReviewEnvironment,
-    report: (message: string) => void,
-  ) => ReviewAgentBoundary;
-  createGitHub?: (
-    environment: ReviewEnvironment,
-    context: PullRequestContext,
-  ) => GitHubReviewBoundary;
+  layers?: Partial<ReviewLayers>;
+  /** Receives step, detail and summary lines. Defaults to `console.log`. */
   report?: (message: string) => void;
+  /** Receives the formatted failure. Defaults to `console.error`. */
+  reportError?: (message: string) => void;
 }
 
+export interface ReviewLayerOptions {
+  environment: NodeJS.ProcessEnv;
+  reporter: ReviewReporterOptions;
+  layers?: Partial<ReviewLayers>;
+}
+
+/** Builds the complete service stack `executeReview` runs against. */
+export function reviewLayer(
+  options: ReviewLayerOptions,
+): Layer.Layer<ReviewServices | Environment, ConfigError | EventError> {
+  const layers = options.layers ?? {};
+  const base = Layer.mergeAll(
+    Environment.layer.pipe(
+      Layer.provide(ConfigProvider.layer(environmentConfigProvider(options.environment))),
+    ),
+    ReviewReporter.layer(options.reporter),
+  );
+  const pullRequest = (layers.pullRequest ?? PullRequest.layer).pipe(Layer.provideMerge(base));
+  return Layer.mergeAll(
+    layers.git ?? GitCommand.layer,
+    layers.github ?? GitHubReview.layer,
+    layers.agent ?? ReviewAgent.layer,
+    layers.config ?? ReviewConfigLoader.layer,
+  ).pipe(Layer.provideMerge(pullRequest));
+}
+
+function summarize(result: ExecuteReviewResult): string {
+  return result.skipped
+    ? `Janitor review skipped: ${result.skipReason ?? "no review was needed."}`
+    : `Janitor review complete: ${result.newFindings} new, ${result.stillOpen} still open, ${result.fixed} fixed, ${result.dismissed} dismissed.`;
+}
+
+/**
+ * Runs a review. On failure the formatted error goes to `reportError` and the
+ * promise rejects with the underlying tagged error.
+ */
 export async function review(
   options: ReviewOptions = {},
   dependencies: ReviewDependencies = {},
 ): Promise<ExecuteReviewResult> {
   const report = dependencies.report ?? console.log;
-  const environmentInput = dependencies.environment ?? process.env;
-  const verbose = options.verbose === true || environmentInput.JANITOR_VERBOSE === "1";
-  const quiet = options.quiet === true || environmentInput.JANITOR_QUIET === "1";
-  const progress = verbose ? report : () => undefined;
-  const step = verbose || !quiet ? report : () => undefined;
-  const environment = readReviewEnvironment(environmentInput);
-  const context = await (dependencies.readContext ?? readPullRequestContext)(
-    environment.githubEventPath,
-    environment.githubRepository,
+  const reportError = dependencies.reportError ?? console.error;
+  const environment = dependencies.environment ?? process.env;
+  const program = executeReview({ cwd: dependencies.cwd ?? process.cwd() }).pipe(
+    Effect.provide(
+      reviewLayer({
+        environment,
+        reporter: {
+          write: report,
+          verbose: options.verbose === true || environment.JANITOR_VERBOSE === "1",
+          quiet: options.quiet === true || environment.JANITOR_QUIET === "1",
+        },
+        layers: dependencies.layers,
+      }),
+    ),
   );
-  const result = await executeReview({
-    cwd: dependencies.cwd ?? process.cwd(),
-    context,
-    git: dependencies.git ?? defaultGitCommand,
-    agent: (
-      dependencies.createAgent ?? ((input, progress) => new CodingReviewAgent(input, progress))
-    )(environment, progress),
-    github: (
-      dependencies.createGitHub ??
-      ((input, pullRequest) =>
-        new GitHubReviewClient({
-          token: input.githubToken,
-          apiUrl: input.githubApiUrl,
-          graphqlUrl: input.githubGraphqlUrl,
-          context: pullRequest,
-        }))
-    )(environment, context),
-    report: progress,
-    step,
-  });
 
-  report(
-    result.skipped
-      ? `Janitor review skipped: ${result.skipReason ?? "no review was needed."}`
-      : `Janitor review complete: ${result.newFindings} new, ${result.stillOpen} still open, ${result.fixed} fixed, ${result.dismissed} dismissed.`,
-  );
-  return result;
+  const exit = await Effect.runPromiseExit(program);
+  if (Exit.isFailure(exit)) {
+    reportError(formatReviewFailure(exit.cause));
+    throw Cause.squash(exit.cause);
+  }
+  report(summarize(exit.value));
+  return exit.value;
 }
 
 export type ReviewAction = (options: ReviewOptions) => unknown | Promise<unknown>;
 
-export function runReviewCommand(action: ReviewAction = review, argv?: string[]) {
+/** The CLI action: `review` has already printed the failure, so only the exit code is left. */
+export async function runReview(options: ReviewOptions): Promise<ExecuteReviewResult | undefined> {
+  try {
+    return await review(options);
+  } catch {
+    process.exitCode = 1;
+    return undefined;
+  }
+}
+
+export function runReviewCommand(action: ReviewAction = runReview, argv?: string[]) {
   return cli(
     reviewCliOptions,
     ({ flags }) => action({ verbose: flags.verbose ?? false, quiet: flags.quiet ?? false }),

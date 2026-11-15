@@ -1,3 +1,6 @@
+import type { Effect, Redacted } from "effect";
+import type { AgentError, GitError, GitHubError, ModelUnavailable } from "#/review/errors";
+
 export type DiffSide = "LEFT" | "RIGHT";
 
 export interface PullRequestContext {
@@ -12,13 +15,13 @@ export interface PullRequestContext {
 }
 
 export interface ReviewEnvironment {
-  githubToken: string;
+  githubToken: Redacted.Redacted<string>;
   githubEventPath: string;
   githubRepository: string;
   githubApiUrl: string;
   githubGraphqlUrl: string;
   provider: string;
-  providerKey: string;
+  providerKey: Redacted.Redacted<string>;
   model: string;
   /** Overrides the provider's default API endpoint, e.g. for a proxy or gateway. */
   baseUrl?: string;
@@ -122,11 +125,14 @@ export interface ReviewSpendEntry extends ReviewUsageDelta {
 export type ReviewUsageReporter = (usage: ReviewUsageDelta) => void;
 
 export interface ReviewAgentBoundary {
-  run(input: ReviewAgentInput, reportUsage?: ReviewUsageReporter): Promise<ModelReviewResult>;
+  run(
+    input: ReviewAgentInput,
+    reportUsage?: ReviewUsageReporter,
+  ): Effect.Effect<ModelReviewResult, ModelUnavailable | AgentError>;
 }
 
 export interface GitCommandBoundary {
-  run(args: string[], cwd: string): Promise<string>;
+  run(args: string[], cwd: string): Effect.Effect<string, GitError>;
 }
 
 export interface ExistingGeneralComment {
@@ -134,19 +140,26 @@ export interface ExistingGeneralComment {
   body: string;
 }
 
-export interface GitHubReviewBoundary {
-  listGeneralComments(): Promise<Array<{ id: number; body: string; author: string | null }>>;
-  listReviewThreads(): Promise<
-    Array<{
-      id: string;
-      isResolved: boolean;
-      isOutdated: boolean;
-      path: string;
-      line: number | null;
-      originalLine: number | null;
-      comments: Array<{ databaseId: number | null; body: string; author: string | null }>;
-    }>
-  >;
+export interface GeneralCommentRecord {
+  id: number;
+  body: string;
+  author: string | null;
+}
+
+export interface ReviewThreadRecord {
+  id: string;
+  isResolved: boolean;
+  isOutdated: boolean;
+  path: string;
+  line: number | null;
+  originalLine: number | null;
+  comments: Array<{ databaseId: number | null; body: string; author: string | null }>;
+}
+
+/** The Promise-based GitHub operations Janitor performs, as `GitHubReviewClient` implements them. */
+export interface GitHubReviewClientShape {
+  listGeneralComments(): Promise<GeneralCommentRecord[]>;
+  listReviewThreads(): Promise<ReviewThreadRecord[]>;
   /** Returns the created comment's web URL, when GitHub provides one. */
   createInlineComment(
     finding: NewFinding,
@@ -156,4 +169,18 @@ export interface GitHubReviewBoundary {
   resolveThread(threadId: string): Promise<void>;
   createGeneralComment(body: string): Promise<number>;
   updateGeneralComment(commentId: number, body: string): Promise<void>;
+}
+
+export interface GitHubReviewBoundary {
+  listGeneralComments(): Effect.Effect<GeneralCommentRecord[], GitHubError>;
+  listReviewThreads(): Effect.Effect<ReviewThreadRecord[], GitHubError>;
+  /** Returns the created comment's web URL, when GitHub provides one. */
+  createInlineComment(
+    finding: NewFinding,
+    body: string,
+    headSha: string,
+  ): Effect.Effect<string | undefined, GitHubError>;
+  resolveThread(threadId: string): Effect.Effect<void, GitHubError>;
+  createGeneralComment(body: string): Effect.Effect<number, GitHubError>;
+  updateGeneralComment(commentId: number, body: string): Effect.Effect<void, GitHubError>;
 }

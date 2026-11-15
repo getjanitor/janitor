@@ -7,7 +7,9 @@ import {
   SessionManager,
   SettingsManager,
 } from "@earendil-works/pi-coding-agent";
+import { Effect, Redacted } from "effect";
 import { createReviewTools } from "#/harness/tools/github/index";
+import { AgentError, errorMessage, ModelUnavailable } from "#/review/errors";
 import type {
   ModelReviewResult,
   ReviewAgentBoundary,
@@ -191,6 +193,79 @@ export function reportAgentEventUsage(
   }
 }
 
+function agentCall<A>(action: string, call: () => Promise<A>): Effect.Effect<A, AgentError> {
+  return Effect.tryPromise({
+    try: call,
+    catch: (cause) => new AgentError({ message: errorMessage(cause), cause }),
+  }).pipe(Effect.withSpan(`janitor.agent.${action}`));
+}
+
+const resolveModel = Effect.fn("janitor.agent.resolve_model")(function* (
+  environment: ReviewEnvironment,
+) {
+  yield* Effect.annotateCurrentSpan({
+    "janitor.model.provider": environment.provider,
+    "janitor.model.id": environment.model,
+  });
+  const modelRuntime = yield* agentCall("create_model_runtime", () => ModelRuntime.create());
+  yield* agentCall("set_api_key", () =>
+    modelRuntime.setRuntimeApiKey(environment.provider, Redacted.value(environment.providerKey)),
+  );
+  let model = modelRuntime.getModel(environment.provider, environment.model);
+  if (model === undefined) {
+    const unavailable = (detail: string, cause?: unknown) =>
+      new ModelUnavailable({
+        message: `Model ${environment.provider}/${environment.model} is unavailable${detail}`,
+        provider: environment.provider,
+        model: environment.model,
+        cause,
+      });
+    // setRuntimeApiKey no longer refreshes the catalog, so fetch it for models it doesn't bundle.
+    const refresh = yield* Effect.tryPromise({
+      try: () =>
+        modelRuntime.refresh({
+          providers: [environment.provider],
+          signal: AbortSignal.timeout(CATALOG_REFRESH_TIMEOUT_MS),
+        }),
+      catch: (cause) => unavailable(` (catalog refresh failed: ${errorMessage(cause)})`, cause),
+    });
+    model = modelRuntime.getModel(environment.provider, environment.model);
+    if (model === undefined) {
+      const errors = [...refresh.errors].map(
+        ([provider, error]) => `${provider}: ${error.message}`,
+      );
+      if (refresh.aborted) errors.push(`timed out after ${CATALOG_REFRESH_TIMEOUT_MS}ms`);
+      return yield* unavailable(
+        errors.length > 0 ? ` (catalog refresh failed: ${errors.join("; ")})` : "",
+      );
+    }
+  }
+  if (environment.baseUrl !== undefined) {
+    model = { ...model, baseUrl: environment.baseUrl };
+  }
+  return { model, modelRuntime };
+});
+
+interface AgentEventListenerOptions {
+  report: (message: string) => void;
+  usageReporter: ReviewUsageReporter | undefined;
+  pricingAvailable: boolean;
+}
+
+/**
+ * Handles every pi session event. Phase 3 seam: converting events into child spans of
+ * `janitor.agent.session` belongs here, next to progress and usage reporting.
+ */
+function agentEventListener(options: AgentEventListenerOptions) {
+  return (event: AgentSessionEvent): void => {
+    const activity = formatAgentActivity(event);
+    if (activity !== undefined) options.report(activity);
+    if (options.usageReporter !== undefined) {
+      reportAgentEventUsage(event, options.pricingAvailable, options.usageReporter);
+    }
+  };
+}
+
 export class CodingReviewAgent implements ReviewAgentBoundary {
   readonly #environment: ReviewEnvironment;
   readonly #report: (message: string) => void;
@@ -200,84 +275,66 @@ export class CodingReviewAgent implements ReviewAgentBoundary {
     this.#report = report;
   }
 
-  async run(
+  run(
     input: ReviewAgentInput,
     usageReporter?: ReviewUsageReporter,
-  ): Promise<ModelReviewResult> {
-    const output: ModelReviewResult = {
-      findings: [],
-      dispositions: [],
-      general: undefined,
-    };
-    const { names, tools } = createReviewTools(input, output);
-    const modelRuntime = await ModelRuntime.create();
-    await modelRuntime.setRuntimeApiKey(this.#environment.provider, this.#environment.providerKey);
-    let model = modelRuntime.getModel(this.#environment.provider, this.#environment.model);
-    if (model === undefined) {
-      // setRuntimeApiKey no longer refreshes the catalog, so fetch it for models it doesn't bundle.
-      const refresh = await modelRuntime.refresh({
-        providers: [this.#environment.provider],
-        signal: AbortSignal.timeout(CATALOG_REFRESH_TIMEOUT_MS),
+  ): Effect.Effect<ModelReviewResult, ModelUnavailable | AgentError> {
+    const environment = this.#environment;
+    const report = this.#report;
+    return Effect.gen(function* () {
+      const output: ModelReviewResult = {
+        findings: [],
+        dispositions: [],
+        general: undefined,
+      };
+      const { names, tools } = createReviewTools(input, output);
+      const { model, modelRuntime } = yield* resolveModel(environment);
+      const pricingAvailable =
+        usageReporter === undefined ? false : hasAvailableModelPricing(model);
+
+      const settingsManager = SettingsManager.inMemory({
+        compaction: { enabled: true },
+        enableAnalytics: false,
+        enableInstallTelemetry: false,
       });
-      model = modelRuntime.getModel(this.#environment.provider, this.#environment.model);
-      if (model === undefined) {
-        const errors = [...refresh.errors].map(
-          ([provider, error]) => `${provider}: ${error.message}`,
-        );
-        if (refresh.aborted) errors.push(`timed out after ${CATALOG_REFRESH_TIMEOUT_MS}ms`);
-        throw new Error(
-          `Model ${this.#environment.provider}/${this.#environment.model} is unavailable` +
-            (errors.length > 0 ? ` (catalog refresh failed: ${errors.join("; ")})` : ""),
-        );
-      }
-    }
-    if (this.#environment.baseUrl !== undefined) {
-      model = { ...model, baseUrl: this.#environment.baseUrl };
-    }
-    const pricingAvailable = usageReporter === undefined ? false : hasAvailableModelPricing(model);
+      const resourceLoader = new DefaultResourceLoader({
+        cwd: input.cwd,
+        agentDir: getAgentDir(),
+        settingsManager,
+        noExtensions: true,
+        noSkills: true,
+        noPromptTemplates: true,
+        noThemes: true,
+        noContextFiles: true,
+        systemPrompt: REVIEW_SYSTEM_PROMPT,
+        appendSystemPrompt: [],
+      });
+      yield* agentCall("load_resources", () => resourceLoader.reload());
 
-    const settingsManager = SettingsManager.inMemory({
-      compaction: { enabled: true },
-      enableAnalytics: false,
-      enableInstallTelemetry: false,
-    });
-    const resourceLoader = new DefaultResourceLoader({
-      cwd: input.cwd,
-      agentDir: getAgentDir(),
-      settingsManager,
-      noExtensions: true,
-      noSkills: true,
-      noPromptTemplates: true,
-      noThemes: true,
-      noContextFiles: true,
-      systemPrompt: REVIEW_SYSTEM_PROMPT,
-      appendSystemPrompt: [],
-    });
-    await resourceLoader.reload();
-
-    const { session } = await createAgentSession({
-      cwd: input.cwd,
-      model,
-      modelRuntime,
-      settingsManager,
-      resourceLoader,
-      sessionManager: SessionManager.inMemory(input.cwd),
-      tools: ["read", "grep", "find", "ls", ...names],
-      customTools: tools,
-    });
-    const unsubscribe = session.subscribe((event) => {
-      const activity = formatAgentActivity(event);
-      if (activity !== undefined) this.#report(activity);
-      if (usageReporter !== undefined) {
-        reportAgentEventUsage(event, pricingAvailable, usageReporter);
-      }
-    });
-    try {
-      await session.prompt(buildReviewPrompt(input));
+      // Released in reverse order: unsubscribe first, then dispose the session.
+      const session = yield* Effect.acquireRelease(
+        agentCall("create_session", () =>
+          createAgentSession({
+            cwd: input.cwd,
+            model,
+            modelRuntime,
+            settingsManager,
+            resourceLoader,
+            sessionManager: SessionManager.inMemory(input.cwd),
+            tools: ["read", "grep", "find", "ls", ...names],
+            customTools: tools,
+          }),
+        ).pipe(Effect.map(({ session }) => session)),
+        (session) => Effect.sync(() => session.dispose()),
+      );
+      yield* Effect.acquireRelease(
+        Effect.sync(() =>
+          session.subscribe(agentEventListener({ report, usageReporter, pricingAvailable })),
+        ),
+        (unsubscribe) => Effect.sync(unsubscribe),
+      );
+      yield* agentCall("prompt", () => session.prompt(buildReviewPrompt(input)));
       return output;
-    } finally {
-      unsubscribe();
-      session.dispose();
-    }
+    }).pipe(Effect.scoped, Effect.withSpan("janitor.agent.session"));
   }
 }

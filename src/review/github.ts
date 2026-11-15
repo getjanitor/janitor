@@ -1,5 +1,12 @@
+import { Effect } from "effect";
 import { Octokit } from "octokit";
-import type { GitHubReviewBoundary, NewFinding, PullRequestContext } from "#/review/types";
+import { errorMessage, GitHubError, httpStatus } from "#/review/errors";
+import type {
+  GitHubReviewBoundary,
+  GitHubReviewClientShape,
+  NewFinding,
+  PullRequestContext,
+} from "#/review/types";
 
 interface ReviewThreadNode {
   id: string;
@@ -90,7 +97,7 @@ function graphqlBaseUrl(graphqlUrl: string): string {
   return graphqlUrl.replace(/\/graphql\/?$/u, "");
 }
 
-export class GitHubReviewClient implements GitHubReviewBoundary {
+export class GitHubReviewClient implements GitHubReviewClientShape {
   readonly #octokit: InstanceType<typeof Octokit>;
   readonly #graphql: <T>(query: string, parameters: Record<string, unknown>) => Promise<T>;
   readonly #context: PullRequestContext;
@@ -200,4 +207,49 @@ export class GitHubReviewClient implements GitHubReviewBoundary {
       body,
     });
   }
+}
+
+function gitHubCall<A>(
+  operation: keyof GitHubReviewClientShape,
+  attributes: Record<string, unknown>,
+  call: () => Promise<A>,
+): Effect.Effect<A, GitHubError> {
+  return Effect.tryPromise({
+    try: call,
+    catch: (cause) =>
+      new GitHubError({
+        message: errorMessage(cause),
+        operation,
+        status: httpStatus(cause),
+        cause,
+      }),
+  }).pipe(Effect.withSpan(`janitor.github.${operation}`, { attributes }));
+}
+
+/**
+ * Lifts a Promise-based client into the Effect boundary. Every rejection becomes a
+ * `GitHubError` carrying the operation and, when present, the HTTP status.
+ */
+export function gitHubReviewFromClient(client: GitHubReviewClientShape): GitHubReviewBoundary {
+  return {
+    listGeneralComments: () =>
+      gitHubCall("listGeneralComments", {}, () => client.listGeneralComments()),
+    listReviewThreads: () => gitHubCall("listReviewThreads", {}, () => client.listReviewThreads()),
+    createInlineComment: (finding, body, headSha) =>
+      gitHubCall(
+        "createInlineComment",
+        { "janitor.finding.path": finding.path, "janitor.finding.line": finding.line },
+        () => client.createInlineComment(finding, body, headSha),
+      ),
+    resolveThread: (threadId) =>
+      gitHubCall("resolveThread", { "janitor.thread.id": threadId }, () =>
+        client.resolveThread(threadId),
+      ),
+    createGeneralComment: (body) =>
+      gitHubCall("createGeneralComment", {}, () => client.createGeneralComment(body)),
+    updateGeneralComment: (commentId, body) =>
+      gitHubCall("updateGeneralComment", { "janitor.comment.id": commentId }, () =>
+        client.updateGeneralComment(commentId, body),
+      ),
+  };
 }
