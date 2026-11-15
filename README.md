@@ -135,6 +135,16 @@ included_branches = ["feat/**", "fix/**"]
 
 Both lists hold glob patterns and are optional. When `included_branches` is set, a pull request is reviewed only if its head branch matches one of its patterns, and `excluded_branches` always takes precedence. Branch filtering runs before the diff is collected, so a filtered pull request costs no model usage and leaves Janitor's existing comments untouched.
 
+The model's reasoning effort is set with the optional `thinking_level`:
+
+```toml
+[review]
+tracked_paths = ["**"]
+thinking_level = "high"
+```
+
+Accepted values are `off`, `minimal`, `low`, `medium`, `high`, `xhigh`, and `max`. When it is omitted, the agent library's default of `medium` applies. A level above what the configured model supports is lowered to the highest level it does support, and models without reasoning run with it off. Higher levels usually find more but take longer and use more output tokens.
+
 Per-run spend tracking is disabled by default. Enable it explicitly to append a persistent ledger to Janitor's main PR Conversation comment:
 
 ```toml

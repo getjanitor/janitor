@@ -91,6 +91,10 @@ tracked_paths = [
 # excluded_branches = ["release/**"]
 # Review only pull requests whose head branch matches one of these glob patterns.
 # included_branches = ["**"]
+
+# Model reasoning effort: off, minimal, low, medium, high, xhigh, or max. Omitted means
+# medium. Levels above what the configured model supports are lowered to its maximum.
+# thinking_level = "high"
 `);
     expect(rendered.workflow).toContain('run: npx --yes "@matfire/janitor@next" review');
     // GitHub rejects resolveReviewThread from integration tokens without contents: write.

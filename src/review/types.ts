@@ -108,8 +108,14 @@ export interface ModelReviewResult {
   general: GeneralReview | undefined;
 }
 
+/** Model reasoning effort levels accepted by the pi agent session. */
+export const THINKING_LEVELS = ["off", "minimal", "low", "medium", "high", "xhigh", "max"] as const;
+export type ThinkingLevel = (typeof THINKING_LEVELS)[number];
+
 export interface ReviewAgentInput {
   cwd: string;
+  /** Requested reasoning effort; pi defaults to `medium` and clamps it to the model's support. */
+  thinkingLevel?: ThinkingLevel;
   context: PullRequestContext;
   diff: ReviewDiff;
   previousFindings: ExistingFinding[];

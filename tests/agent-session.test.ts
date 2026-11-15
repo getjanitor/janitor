@@ -108,6 +108,20 @@ describe("coding review agent session", () => {
     expect(pi.session.dispose).toHaveBeenCalledOnce();
   });
 
+  it("passes the configured thinking level to the pi session", async () => {
+    const { createAgentSession } = await import("@earendil-works/pi-coding-agent");
+
+    await Effect.runPromise(new CodingReviewAgent(environment).run(input));
+    expect(vi.mocked(createAgentSession).mock.calls.at(-1)?.[0]?.thinkingLevel).toBeUndefined();
+
+    await Effect.runPromise(
+      new CodingReviewAgent(environment).run({ ...input, thinkingLevel: "high" }),
+    );
+    expect(vi.mocked(createAgentSession).mock.calls.at(-1)?.[0]).toMatchObject({
+      thinkingLevel: "high",
+    });
+  });
+
   it("unsubscribes and disposes the session when the prompt fails", async () => {
     const failure = new Error("provider request failed");
     pi.session.prompt.mockRejectedValueOnce(failure);
