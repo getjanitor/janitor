@@ -113,6 +113,7 @@ tracked_paths = [
     expect(rendered.workflow).toContain(
       "JANITOR_PROVIDER_KEY: ${{ secrets.JANITOR_PROVIDER_KEY }}",
     );
+    expect(rendered.workflow).toContain("JANITOR_BASE_URL: ${{ vars.JANITOR_BASE_URL }}");
     expect(rendered.workflow).not.toContain("create-github-app-token");
     expect(rendered.workflow).not.toContain("{= janitor_package");
   });

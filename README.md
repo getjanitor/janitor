@@ -87,6 +87,8 @@ Configure all three values as **GitHub Actions secrets** in the repository:
 
 Optionally configure `JANITOR_VERBOSE` as a **GitHub Actions repository variable** with the value `1` to enable detailed review logs in the generated workflow, or `JANITOR_QUIET` with the value `1` to hide the review step logs.
 
+To send model requests to a different endpoint than the provider's default, such as a proxy, gateway, or self-hosted deployment, set the optional **GitHub Actions repository variable** `JANITOR_BASE_URL` (for example `https://llm-proxy.example.com/v1`). It replaces the base URL of the selected model, so the endpoint must speak the same API as `JANITOR_PROVIDER`. `JANITOR_MODEL` must still be a model known to that provider's catalog. When invoking `janitor review` directly, export `JANITOR_BASE_URL` instead.
+
 The generated pull-request workflow grants only `contents: write` and `pull-requests: write`. It uses `GITHUB_TOKEN` to post PR-level and diff comments, and resolve review threads for findings that have been fixed. GitHub rejects the `resolveReviewThread` mutation from integration tokens that lack `contents: write`, even though Janitor never pushes to the repository. Because that token can write repository contents and is handed to the Janitor package that `npx` downloads, pin an exact Janitor version instead of a floating tag such as `latest` if you want to limit exposure to a compromised release. The workflow intentionally skips pull requests from forks because repository secrets and write access are unavailable to those runs. Runs are grouped by pull request and a newer event cancels an obsolete in-progress review.
 
 #### Using a GitHub App identity
