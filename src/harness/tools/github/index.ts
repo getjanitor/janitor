@@ -12,7 +12,7 @@ export function createReviewTools(
   const tools = [
     createGetReviewDiffTool(input),
     createReportFindingTool(output, input.incremental),
-    createDispositionExistingFindingTool(output),
+    createDispositionExistingFindingTool(output, input.previousFindings),
     createSubmitReviewTool(output),
   ];
   return { names: tools.map((tool) => tool.name), tools };
