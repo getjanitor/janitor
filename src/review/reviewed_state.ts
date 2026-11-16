@@ -27,6 +27,9 @@ export function parseReviewedState(body: string): ReviewedState | undefined {
       return undefined;
     }
     const state: ReviewedState = { headSha: record.headSha };
+    if (typeof record.mergeBase === "string" && REVISION_PATTERN.test(record.mergeBase)) {
+      state.mergeBase = record.mergeBase;
+    }
     const summary = carriedText(record.summary);
     const mermaid = carriedText(record.mermaid);
     if (summary !== undefined) state.summary = summary;

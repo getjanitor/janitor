@@ -9,6 +9,7 @@ import {
 import {
   collectIncrementalReview,
   collectReviewDiff,
+  isAncestorCommit,
   isCommentableLocation,
   isIncrementalLocation,
 } from "#/review/git";
@@ -410,6 +411,20 @@ const planReview = Effect.fn("janitor.review.plan")(function* (
   if (config.incremental === false) return yield* full("review.incremental is disabled.");
   const previous = feedback.reviewed;
   if (previous === undefined) return yield* full("no previous successful Janitor review.");
+  // Retargeting the pull request or rewriting the base branch changes what the pull
+  // request diff contains without any push, so content the last review never saw may
+  // now be part of it. Merging the base branch in only moves the merge base forward.
+  if (previous.mergeBase === undefined) {
+    return yield* full("the last review did not record its merge base.");
+  }
+  if (
+    previous.mergeBase !== diff.mergeBase &&
+    !(yield* isAncestorCommit(cwd, previous.mergeBase, diff.mergeBase, git))
+  ) {
+    return yield* full(
+      `the merge base moved from ${previous.mergeBase} to ${diff.mergeBase} (retargeted or rewritten base branch).`,
+    );
+  }
   // At an already reviewed head nothing changed, so there is nothing for git to compare.
   const sameHead = previous.headSha === diff.headSha;
   let collected: IncrementalReview;
@@ -519,8 +534,9 @@ function generalCommentRenderer(
   reviewed: ReviewedState,
 ) {
   // The carried summary and diagram only improve the next re-review, so they are
-  // dropped before any visible content; the reviewed commit itself is always kept.
-  const reviewedVariants: ReviewedState[] = [reviewed, { headSha: reviewed.headSha }];
+  // dropped before any visible content; the reviewed commit and merge base are always kept.
+  const { summary: _summary, mermaid: _mermaid, ...anchor } = reviewed;
+  const reviewedVariants: ReviewedState[] = [reviewed, anchor];
   return (
     listed: readonly GeneralCommentFinding[],
     outsideDiff: readonly NewFinding[],
@@ -757,6 +773,7 @@ const reviewAndPublish = Effect.fnUntraced(function* (
     trackSpend,
     {
       headSha: context.headSha,
+      mergeBase: diff.mergeBase,
       summary: validated.general.summary,
       mermaid: validated.general.mermaid,
     },

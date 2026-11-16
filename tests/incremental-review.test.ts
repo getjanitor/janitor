@@ -55,7 +55,9 @@ function prPatch(path: string, unified: number): string {
  * A pull request changing two files at lines 2–3. Since `prev-sha`, only the paths in
  * `changedSince` changed, at line 3 plus line 9, which is not part of the PR diff.
  */
-function twoFileGit(options: { ancestor?: boolean; changedSince?: string[] } = {}) {
+function twoFileGit(
+  options: { ancestor?: boolean; changedSince?: string[]; baseMovedOff?: boolean } = {},
+) {
   const calls: string[][] = [];
   const git: GitCommandBoundary = {
     run: (args) =>
@@ -64,7 +66,9 @@ function twoFileGit(options: { ancestor?: boolean; changedSince?: string[] } = {
           calls.push(args);
           if (args[0] === "rev-parse") return "head-sha\n";
           if (args[0] === "merge-base" && args[1] === "--is-ancestor") {
-            if (options.ancestor === false) throw new Error("exit code 1");
+            const fails =
+              args[2] === "prev-sha" ? options.ancestor === false : options.baseMovedOff;
+            if (fails) throw new Error("exit code 1");
             return "";
           }
           if (args[0] === "merge-base") return "merge-sha\n";
@@ -207,11 +211,12 @@ describe("incremental re-reviews", () => {
     expect(result.incrementalFrom).toBeUndefined();
     expect(parseReviewedState(lastBody(client))).toEqual({
       headSha: "head-sha",
+      mergeBase: "merge-sha",
       summary: general.summary,
       mermaid: general.mermaid,
     });
 
-    const rerun = github({ reviewed: { headSha: "prev-sha" } });
+    const rerun = github({ reviewed: { headSha: "prev-sha", mergeBase: "merge-sha" } });
     await run({ git: twoFileGit().git, github: rerun });
     const runningBody = String(rerun.updateGeneralComment.mock.calls[0]?.[1]);
     expect(runningBody).toContain("Review in progress");
@@ -219,7 +224,7 @@ describe("incremental re-reviews", () => {
   });
 
   it("keeps the last reviewed head when a re-review fails", async () => {
-    const client = github({ reviewed: { headSha: "prev-sha" } });
+    const client = github({ reviewed: { headSha: "prev-sha", mergeBase: "merge-sha" } });
     await expect(
       run({
         git: twoFileGit().git,
@@ -232,7 +237,7 @@ describe("incremental re-reviews", () => {
   });
 
   it("skips without touching GitHub when head was already reviewed", async () => {
-    const client = github({ reviewed: { headSha: "head-sha" } });
+    const client = github({ reviewed: { headSha: "head-sha", mergeBase: "merge-sha" } });
     const { result, inputs } = await run({ git: twoFileGit().git, github: client });
     expect(result).toMatchObject({
       skipped: true,
@@ -243,7 +248,7 @@ describe("incremental re-reviews", () => {
   });
 
   it("reviews an already reviewed head again when incremental reviews are disabled", async () => {
-    const client = github({ reviewed: { headSha: "head-sha" } });
+    const client = github({ reviewed: { headSha: "head-sha", mergeBase: "merge-sha" } });
     const { result, inputs } = await run({
       git: twoFileGit().git,
       github: client,
@@ -254,7 +259,7 @@ describe("incremental re-reviews", () => {
   });
 
   it("skips when no pull-request file changed since the last review", async () => {
-    const client = github({ reviewed: { headSha: "prev-sha" } });
+    const client = github({ reviewed: { headSha: "prev-sha", mergeBase: "merge-sha" } });
     const { result, inputs } = await run({
       git: twoFileGit({ changedSince: [] }).git,
       github: client,
@@ -270,7 +275,7 @@ describe("incremental re-reviews", () => {
     "re-evaluates only disputed findings instead of skipping when %s",
     async (_case, reviewedSha, changedSince) => {
       const client = github({
-        reviewed: { headSha: reviewedSha },
+        reviewed: { headSha: reviewedSha, mergeBase: "merge-sha" },
         threads: [thread("untouched", "src/a.ts"), thread("disputed", "src/b.ts", ["Intended."])],
       });
       const { result, inputs } = await run({
@@ -289,7 +294,12 @@ describe("incremental re-reviews", () => {
 
   it("re-reviews only changed files and keeps unaffected findings open itself", async () => {
     const client = github({
-      reviewed: { headSha: "prev-sha", summary: "Old summary", mermaid: "graph A-->B" },
+      reviewed: {
+        headSha: "prev-sha",
+        mergeBase: "merge-sha",
+        summary: "Old summary",
+        mermaid: "graph A-->B",
+      },
       threads: [
         thread("in-changed-file", "src/a.ts"),
         thread("untouched", "src/b.ts"),
@@ -331,7 +341,7 @@ describe("incremental re-reviews", () => {
 
   it("drops findings outside the incremental scope that bypassed the tool", async () => {
     const details: string[] = [];
-    const client = github({ reviewed: { headSha: "prev-sha" } });
+    const client = github({ reviewed: { headSha: "prev-sha", mergeBase: "merge-sha" } });
     const finding = {
       title: "Issue",
       body: "Impact",
@@ -357,9 +367,34 @@ describe("incremental re-reviews", () => {
     expect(details.filter((message) => message.startsWith("Dropping finding"))).toHaveLength(2);
   });
 
+  it("stays incremental when the base branch was merged in and the merge base moved forward", async () => {
+    const client = github({ reviewed: { headSha: "prev-sha", mergeBase: "older-merge-sha" } });
+    const { result } = await run({ git: twoFileGit().git, github: client });
+    expect(result.incrementalFrom).toBe("prev-sha");
+  });
+
+  it.each([
+    ["the merge base moved off the reviewed one", { mergeBase: "old-merge-sha" }, true],
+    ["the last review recorded no merge base", {}, false],
+  ])(
+    "falls back to a full review instead of skipping when %s",
+    async (_case, recorded, baseMovedOff) => {
+      const details: string[] = [];
+      const client = github({ reviewed: { headSha: "head-sha", ...recorded } });
+      const { result, inputs } = await run({
+        git: twoFileGit({ baseMovedOff }).git,
+        github: client,
+        details,
+      });
+      expect(result.skipped).toBe(false);
+      expect(inputs[0]?.incremental).toBeUndefined();
+      expect(details.some((message) => message.includes("merge base"))).toBe(true);
+    },
+  );
+
   it("falls back to a full review after a force-push", async () => {
     const client = github({
-      reviewed: { headSha: "prev-sha" },
+      reviewed: { headSha: "prev-sha", mergeBase: "merge-sha" },
       threads: [thread("t", "src/b.ts")],
     });
     const { result, inputs } = await run({

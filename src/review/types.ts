@@ -55,6 +55,11 @@ export interface ReviewDiff {
 /** What Janitor recorded about its last successful review of a pull request. */
 export interface ReviewedState {
   headSha: string;
+  /**
+   * The pull-request merge base at `headSha`. A re-review is incremental only while the
+   * merge base stays on or moves forward from it, as when the base branch is merged in.
+   */
+  mergeBase?: string;
   /** The general review published at `headSha`, so a re-review can revise it. */
   summary?: string;
   mermaid?: string;

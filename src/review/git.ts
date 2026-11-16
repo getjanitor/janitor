@@ -214,6 +214,19 @@ export const collectReviewDiff = Effect.fn("janitor.git.collect_review_diff")(fu
   return diff;
 });
 
+/** Whether `ancestor` is reachable from `descendant`; false too when either is unknown. */
+export function isAncestorCommit(
+  cwd: string,
+  ancestor: string,
+  descendant: string,
+  git: GitCommandBoundary = defaultGitCommand,
+): Effect.Effect<boolean> {
+  return git.run(["merge-base", "--is-ancestor", ancestor, descendant], cwd).pipe(
+    Effect.as(true),
+    Effect.catchTag("GitError", () => Effect.succeed(false)),
+  );
+}
+
 /** Why an incremental review was not possible, so the whole pull request is reviewed. */
 export interface FullReviewFallback {
   fallback: string;
@@ -235,12 +248,7 @@ export const collectIncrementalReview = Effect.fn("janitor.git.collect_increment
     // Exits non-zero when the commit is unknown (e.g. a shallow clone) or was rewritten
     // away by a force-push or rebase. Either way the previous review no longer anchors
     // cleanly onto head, so the whole pull request is reviewed again.
-    const ancestor = yield* git
-      .run(["merge-base", "--is-ancestor", previous.headSha, diff.headSha], cwd)
-      .pipe(
-        Effect.as(true),
-        Effect.catchTag("GitError", () => Effect.succeed(false)),
-      );
+    const ancestor = yield* isAncestorCommit(cwd, previous.headSha, diff.headSha, git);
     if (!ancestor) {
       const fallback: FullReviewFallback = {
         fallback: `last reviewed commit ${previous.headSha} is not an ancestor of head (force-push, rebase, or missing history).`,
