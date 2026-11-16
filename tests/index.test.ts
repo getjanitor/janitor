@@ -113,6 +113,7 @@ describe("command actions", () => {
       "next",
       "--identity",
       "github-app",
+      "--merge-check",
       "--force",
     ]);
 
@@ -121,6 +122,7 @@ describe("command actions", () => {
       force: true,
       githubIdentity: "github-app",
       janitorVersion: "next",
+      mergeCheck: true,
     });
   });
 
@@ -133,6 +135,7 @@ describe("command actions", () => {
       force: false,
       githubIdentity: undefined,
       janitorVersion: undefined,
+      mergeCheck: false,
     });
   });
 

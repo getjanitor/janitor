@@ -67,6 +67,7 @@ describe("init template rendering", () => {
       github_app: false,
       janitor_package: "@matfire/janitor@next",
       janitor_version: "next",
+      merge_check: false,
       tracked_paths: ["src/**", 'a/quoted-"path"/**', "line\nbreak/**", "windows\\path/**"],
     });
 
@@ -99,7 +100,15 @@ tracked_paths = [
 # Model reasoning effort: off, minimal, low, medium, high, xhigh, or max. Omitted means
 # medium. Levels above what the configured model supports are lowered to its maximum.
 # thinking_level = "high"
+
+# Report a "Janitor" check run on the head commit that passes only when the review's
+# confidence (1 to 5) reaches min_confidence. Make it a required status check in branch
+# protection to block merges. Needs the workflow's checks: write permission
+# (\`janitor init --merge-check\`).
+# [review.merge_check]
+# min_confidence = 4
 `);
+    expect(rendered.workflow).not.toContain("checks: write");
     expect(rendered.workflow).toContain('run: npx --yes "@matfire/janitor@next" review');
     // GitHub rejects resolveReviewThread from integration tokens without contents: write.
     expect(rendered.workflow).toContain("contents: write");
@@ -131,6 +140,7 @@ tracked_paths = [
       github_app: true,
       janitor_package: "@matfire/janitor@latest",
       janitor_version: "latest",
+      merge_check: false,
       tracked_paths: ["**"],
     });
 
@@ -153,12 +163,30 @@ tracked_paths = [
     expect(rendered.workflow).not.toContain("secrets.GITHUB_TOKEN");
   });
 
+  it("enables the merge check and grants the Checks permission", async () => {
+    const rendered = await renderInitFiles({
+      github_app: true,
+      janitor_package: "@matfire/janitor@latest",
+      janitor_version: "latest",
+      merge_check: true,
+      tracked_paths: ["**"],
+    });
+
+    expect(rendered.config).toContain("\n[review.merge_check]\nmin_confidence = 4\n");
+    expect(rendered.config).not.toContain("# [review.merge_check]");
+    expect(rendered.workflow).toContain("  pull-requests: write\n  checks: write\n");
+    expect(rendered.workflow).toContain(
+      "          permission-pull-requests: write\n          permission-checks: write\n",
+    );
+  });
+
   it("fails when a strict template variable is missing", async () => {
     await expect(
       renderInitFiles({
         janitor_version: "latest",
         tracked_paths: ["**"],
         github_app: false,
+        merge_check: false,
       } as never),
     ).rejects.toThrow(/janitor_package/u);
   });

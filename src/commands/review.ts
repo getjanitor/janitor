@@ -61,6 +61,8 @@ export interface ReviewDependencies {
   report?: (message: string) => void;
   /** Receives the formatted failure. Defaults to `console.error`. */
   reportError?: (message: string) => void;
+  /** Interrupts the review when aborted, so its failure handlers still report. */
+  signal?: AbortSignal;
 }
 
 export interface ReviewLayerOptions {
@@ -120,7 +122,7 @@ export async function review(
     ),
   );
 
-  const exit = await Effect.runPromiseExit(program);
+  const exit = await Effect.runPromiseExit(program, { signal: dependencies.signal });
   if (Exit.isFailure(exit)) {
     reportError(formatReviewFailure(exit.cause));
     throw Cause.squash(exit.cause);
@@ -133,11 +135,20 @@ export type ReviewAction = (options: ReviewOptions) => unknown | Promise<unknown
 
 /** The CLI action: `review` has already printed the failure, so only the exit code is left. */
 export async function runReview(options: ReviewOptions): Promise<ExecuteReviewResult | undefined> {
+  // GitHub Actions sends SIGINT, then SIGTERM, when a run is cancelled. Interrupting
+  // the review lets it mark its comment and check run before the process exits.
+  const controller = new AbortController();
+  const interrupt = () => controller.abort();
+  process.once("SIGINT", interrupt);
+  process.once("SIGTERM", interrupt);
   try {
-    return await review(options);
+    return await review(options, { signal: controller.signal });
   } catch {
     process.exitCode = 1;
     return undefined;
+  } finally {
+    process.off("SIGINT", interrupt);
+    process.off("SIGTERM", interrupt);
   }
 }
 

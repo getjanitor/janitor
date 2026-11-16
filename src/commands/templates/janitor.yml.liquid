@@ -8,7 +8,8 @@ on:
 permissions:
   contents: write
   pull-requests: write
-
+{% if merge_check %}  checks: write
+{% endif %}
 concurrency:
   group: janitor-${{ github.event.pull_request.number }}
   cancel-in-progress: true
@@ -35,7 +36,8 @@ jobs:
           repositories: ${{ github.event.repository.name }}
           permission-contents: write
           permission-pull-requests: write
-{% endif %}      - name: Set up Node.js
+{% if merge_check %}          permission-checks: write
+{% endif %}{% endif %}      - name: Set up Node.js
         uses: actions/setup-node@v7
         with:
           node-version: 22

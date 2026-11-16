@@ -56,6 +56,7 @@ janitor init --janitor-version latest --identity github-actions --force
 | ------------------------------------ | ------------------------------------------------------------------ |
 | `--janitor-version <version-or-tag>` | Select the Janitor npm version or tag embedded in the workflow.    |
 | `--identity <identity>`              | Select `github-actions` or `github-app` as the reviewing identity. |
+| `--merge-check`                      | Enable the confidence merge check and grant `checks: write`.       |
 | `--force`                            | Replace changed generated files without confirmation.              |
 
 Initialization generates:
@@ -144,6 +145,28 @@ thinking_level = "high"
 ```
 
 Accepted values are `off`, `minimal`, `low`, `medium`, `high`, `xhigh`, and `max`. When it is omitted, the agent library's default of `medium` applies. A level above what the configured model supports is lowered to the highest level it does support, and models without reasoning run with it off. Higher levels usually find more but take longer and use more output tokens.
+
+#### Blocking merges on review confidence
+
+Janitor can report a check run named `Janitor` on the pull request's head commit, which passes only when the review's confidence reaches a minimum:
+
+```toml
+[review.merge_check]
+min_confidence = 4
+```
+
+`min_confidence` is an integer from 1 to 5. Creating check runs needs the `checks: write` permission, which `janitor init --merge-check` adds to the generated workflow (and to the GitHub App token, when you use `--identity github-app`). A GitHub App identity also needs the **Checks: Read and write** repository permission on the app. If the token can't create checks, the review fails before any comment changes or model usage. To block merges, add `Janitor` as a required status check in a branch protection rule or ruleset. With a GitHub App identity, set the check's expected source to your app so that no other integration can satisfy it.
+
+| Review outcome                                     | Check conclusion    |
+| -------------------------------------------------- | ------------------- |
+| Confidence is at or above `min_confidence`         | `success`           |
+| Confidence is below `min_confidence`               | `failure`           |
+| Skipped by `tracked_paths` or the branch filters   | `skipped`           |
+| No pull-request file changed since the last review | Same as that review |
+| The review failed (provider, agent, or GitHub API) | `failure`           |
+| The run was cancelled, such as by a newer push     | `cancelled`         |
+
+GitHub counts `skipped` as passing, so pull requests that don't need a review aren't blocked. An incremental re-review that skips because no pull-request file changed, such as after merging the base branch, reapplies the last review's confidence to the new commit, so an empty push can't turn a failing check into a passing one. If that review predates the merge check and recorded no confidence, Janitor reviews the whole pull request again. A failed review blocks the merge until a rerun succeeds. The check is created as soon as `janitor.toml` loads, so every later failure completes it. A `janitor.toml` that fails to load can't report the check, because Janitor can't tell that it is enabled; the workflow job fails instead. The generated workflow doesn't run for draft pull requests or pull requests from forks, so those never receive the check. If it is required, they can't be merged until the check is posted, for example after a maintainer moves the changes to a branch in the repository. With the default `github-actions` identity, GitHub attributes the check to GitHub Actions and may list it under another workflow's check suite.
 
 Per-run spend tracking is disabled by default. Enable it explicitly to append a persistent ledger to Janitor's main PR Conversation comment:
 
