@@ -1,3 +1,17 @@
+## [2.6.0] - 2026-11-16
+
+### 🚀 Features
+
+- *(review)* Make the model thinking level configurable
+- *(review)* Re-review only what changed since the last review
+- *(review)* Focus the agent on changes since the last review
+- *(review)* Gate a merge check on review confidence
+
+### 🐛 Bug Fixes
+
+- *(review)* Re-evaluate disputed findings instead of skipping
+- *(review)* Review in full when the merge base moves off
+- *(review)* Reject dispositions for threads the prompt did not supply
 ## [2.5.0] - 2026-11-15
 
 ### 🚀 Features
