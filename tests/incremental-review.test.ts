@@ -263,6 +263,30 @@ describe("incremental re-reviews", () => {
     expect(inputs).toHaveLength(0);
   });
 
+  it.each([
+    ["the head was already reviewed", "head-sha", ["src/a.ts"]],
+    ["no pull-request file changed", "prev-sha", []],
+  ])(
+    "re-evaluates only disputed findings instead of skipping when %s",
+    async (_case, reviewedSha, changedSince) => {
+      const client = github({
+        reviewed: { headSha: reviewedSha },
+        threads: [thread("untouched", "src/a.ts"), thread("disputed", "src/b.ts", ["Intended."])],
+      });
+      const { result, inputs } = await run({
+        git: twoFileGit({ changedSince }).git,
+        github: client,
+      });
+      expect(result.skipped).toBe(false);
+      expect(inputs[0]?.incremental?.files).toEqual([]);
+      expect(inputs[0]?.previousFindings.map((finding) => finding.threadId)).toEqual(["disputed"]);
+      expect(result).toMatchObject({ stillOpen: 2, newFindings: 0 });
+      expect(buildReviewPrompt(inputs[0] as ReviewAgentInput)).toContain(
+        "do not report new findings",
+      );
+    },
+  );
+
   it("re-reviews only changed files and keeps unaffected findings open itself", async () => {
     const client = github({
       reviewed: { headSha: "prev-sha", summary: "Old summary", mermaid: "graph A-->B" },

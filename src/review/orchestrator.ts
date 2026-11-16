@@ -410,17 +410,25 @@ const planReview = Effect.fn("janitor.review.plan")(function* (
   if (config.incremental === false) return yield* full("review.incremental is disabled.");
   const previous = feedback.reviewed;
   if (previous === undefined) return yield* full("no previous successful Janitor review.");
-  if (previous.headSha === diff.headSha) {
-    return { kind: "skip", reason: `head ${diff.headSha} was already reviewed.` } as ReviewPlan;
+  // At an already reviewed head nothing changed, so there is nothing for git to compare.
+  const sameHead = previous.headSha === diff.headSha;
+  let collected: IncrementalReview;
+  if (sameHead) {
+    collected = { previous, files: [] };
+  } else {
+    const result = yield* collectIncrementalReview(cwd, diff, previous, git);
+    if ("fallback" in result) return yield* full(result.fallback);
+    collected = result;
   }
-
-  const collected = yield* collectIncrementalReview(cwd, diff, previous, git);
-  if ("fallback" in collected) return yield* full(collected.fallback);
-  if (collected.files.length === 0) {
-    return {
-      kind: "skip",
-      reason: `no pull-request file changed since the last review at ${previous.headSha}.`,
-    } as ReviewPlan;
+  // Replies can dispute a finding without any code change, so they still need the agent.
+  if (
+    collected.files.length === 0 &&
+    !feedback.previousFindings.some((finding) => finding.replies.length > 0)
+  ) {
+    const reason = sameHead
+      ? `head ${diff.headSha} was already reviewed.`
+      : `no pull-request file changed since the last review at ${previous.headSha}.`;
+    return { kind: "skip", reason } as ReviewPlan;
   }
 
   const agentFindings = feedback.previousFindings.filter((finding) =>
