@@ -41,6 +41,50 @@ async function execute(
   return tool.execute("call", params as never, undefined, undefined, undefined as never);
 }
 
+const incrementalInput: ReviewAgentInput = {
+  ...input,
+  incremental: {
+    previous: { headSha: "prev" },
+    files: [
+      {
+        path: "src/a.ts",
+        patch: "@@ -1 +1 @@\n-older\n+new",
+        rightLines: new Set([1]),
+      },
+    ],
+  },
+};
+
+describe("incremental review tools", () => {
+  it("serves the since-last-review diff alongside the full pull-request diff", async () => {
+    const output: ModelReviewResult = { findings: [], dispositions: [], general: undefined };
+    const { tools } = createReviewTools(incrementalInput, output);
+    const since = await execute(tools, "get_review_diff", {
+      path: "src/a.ts",
+      since_last_review: true,
+    });
+    expect(since.content).toEqual([{ type: "text", text: "@@ -1 +1 @@\n-older\n+new" }]);
+    const full = await execute(tools, "get_review_diff", { path: "src/a.ts" });
+    expect(full.content).toEqual([{ type: "text", text: "@@ -1 +1 @@\n-old\n+new" }]);
+    const list = await execute(tools, "get_review_diff", { since_last_review: true });
+    expect(list.content).toEqual([{ type: "text", text: "src/a.ts" }]);
+  });
+
+  it("rejects findings on lines not changed since the last review", async () => {
+    const output: ModelReviewResult = { findings: [], dispositions: [], general: undefined };
+    const { tools } = createReviewTools(incrementalInput, output);
+    const finding = { title: "Issue", body: "Impact", severity: "high", side: "RIGHT" };
+    await expect(
+      execute(tools, "report_finding", { ...finding, path: "src/a.ts", line: 2 }),
+    ).rejects.toThrow(/not changed since the last reviewed commit prev/u);
+    await expect(
+      execute(tools, "report_finding", { ...finding, path: "src/b.ts", line: 1 }),
+    ).rejects.toThrow(/not changed since/u);
+    await execute(tools, "report_finding", { ...finding, path: "src/a.ts", line: 1 });
+    expect(output.findings).toHaveLength(1);
+  });
+});
+
 describe("review agent tools", () => {
   it("exposes the diff read-only and records structured model output", async () => {
     const output: ModelReviewResult = { findings: [], dispositions: [], general: undefined };

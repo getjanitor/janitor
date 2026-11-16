@@ -1,4 +1,6 @@
+import { renderReviewedState } from "#/review/reviewed_state";
 import { renderSpendHistory } from "#/review/spend";
+export { REVIEWED_STATE_MARKER } from "#/review/reviewed_state";
 export { SPEND_METADATA_MARKER } from "#/review/spend";
 import type {
   ExistingFinding,
@@ -7,6 +9,7 @@ import type {
   GeneralReview,
   NewFinding,
   ResolvedFindingDiscussion,
+  ReviewedState,
   ReviewSpendEntry,
 } from "#/review/types";
 
@@ -23,12 +26,13 @@ export function renderFindingComment(finding: NewFinding): string {
 export function renderGeneralCommentStatus(
   status: "running" | "failed",
   spendHistory?: readonly ReviewSpendEntry[],
+  reviewed?: ReviewedState,
 ): string {
   const message =
     status === "running"
       ? "👀 Review in progress…"
       : "❌ Review failed. See the workflow logs for details.";
-  return `${GENERAL_REVIEW_MARKER}\n## Janitor review\n\n${message}\n${renderSpendHistory(spendHistory ?? [])}`;
+  return `${GENERAL_REVIEW_MARKER}\n## Janitor review\n\n${message}\n${renderSpendHistory(spendHistory ?? [])}${renderReviewedState(reviewed)}`;
 }
 
 function findingLocation(finding: NewFinding): string {
@@ -131,6 +135,7 @@ export function renderGeneralComment(
   counts: FindingCounts,
   spendHistory?: readonly ReviewSpendEntry[],
   outsideDiff = "",
+  reviewed?: ReviewedState,
 ): string {
   return `${GENERAL_REVIEW_MARKER}
 ## Janitor review
@@ -152,7 +157,7 @@ ${general.mermaid.trim()}
 ### Confidence: ${general.confidence}/5
 
 ${general.confidenceReason}
-${renderSpendHistory(spendHistory ?? [])}
+${renderSpendHistory(spendHistory ?? [])}${renderReviewedState(reviewed)}
 `;
 }
 

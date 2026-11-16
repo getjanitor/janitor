@@ -52,6 +52,35 @@ export interface ReviewDiff {
   files: ChangedFile[];
 }
 
+/** What Janitor recorded about its last successful review of a pull request. */
+export interface ReviewedState {
+  headSha: string;
+  /**
+   * The pull-request merge base at `headSha`. A re-review is incremental only while the
+   * merge base stays on or moves forward from it, as when the base branch is merged in.
+   */
+  mergeBase?: string;
+  /** The general review published at `headSha`, so a re-review can revise it. */
+  summary?: string;
+  mermaid?: string;
+}
+
+/** A pull-request file whose content changed between the last reviewed commit and head. */
+export interface IncrementalFile {
+  path: string;
+  previousPath?: string;
+  /** Unified diff from the last reviewed commit to head. */
+  patch: string;
+  /** Head-side lines changed since the last review that are also part of the pull-request diff. */
+  rightLines: ReadonlySet<number>;
+}
+
+/** Narrows a re-review to what changed since the last successful review. */
+export interface IncrementalReview {
+  previous: ReviewedState;
+  files: IncrementalFile[];
+}
+
 export type FindingSeverity = "critical" | "high" | "medium" | "low";
 
 export interface NewFinding {
@@ -118,6 +147,8 @@ export interface ReviewAgentInput {
   thinkingLevel?: ThinkingLevel;
   context: PullRequestContext;
   diff: ReviewDiff;
+  /** Set for a re-review that only reports issues introduced since the last review. */
+  incremental?: IncrementalReview;
   previousFindings: ExistingFinding[];
   resolvedDiscussions: ResolvedFindingDiscussion[];
 }

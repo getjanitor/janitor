@@ -316,6 +316,7 @@ describe("review runtime and configuration", () => {
     await expect(Effect.runPromise(loadReviewConfig(directory))).resolves.toEqual({
       trackedPaths: ["src/**", ".github/**"],
       trackSpend: false,
+      incremental: true,
     });
     expect(
       shouldRunReview(
@@ -545,6 +546,17 @@ describe("review runtime and configuration", () => {
     );
     await expect(Effect.runPromise(loadReviewConfig(directory))).resolves.toMatchObject({
       trackSpend: false,
+    });
+  });
+
+  it("loads incremental re-reviews as enabled unless explicitly disabled", async () => {
+    const directory = await temporaryDirectory();
+    await writeFile(
+      join(directory, "janitor.toml"),
+      'version = "latest"\n[review]\ntracked_paths = ["**"]\nincremental = false\n',
+    );
+    await expect(Effect.runPromise(loadReviewConfig(directory))).resolves.toMatchObject({
+      incremental: false,
     });
   });
 });

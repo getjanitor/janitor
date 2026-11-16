@@ -1,10 +1,14 @@
 import { defineTool } from "@earendil-works/pi-coding-agent";
 import { Type } from "typebox";
 import { toolSuccess } from "#/harness/tools/github/result";
+import { isIncrementalLocation } from "#/review/git";
 import { requireValidModelText } from "#/review/model_result";
-import type { ModelReviewResult, NewFinding } from "#/review/types";
+import type { IncrementalReview, ModelReviewResult, NewFinding } from "#/review/types";
 
-export function createReportFindingTool(output: ModelReviewResult) {
+export function createReportFindingTool(
+  output: ModelReviewResult,
+  incremental?: IncrementalReview,
+) {
   return defineTool({
     name: "report_finding",
     label: "Report finding",
@@ -32,6 +36,14 @@ export function createReportFindingTool(output: ModelReviewResult) {
     execute: async (_toolCallId, params) => {
       requireValidModelText(params.title, "finding title");
       requireValidModelText(params.body, "finding body");
+      if (
+        incremental !== undefined &&
+        !isIncrementalLocation(incremental, params.path, params.side, params.line)
+      ) {
+        throw new Error(
+          `${params.path}:${params.line} (${params.side}) was not changed since the last reviewed commit ${incremental.previous.headSha}. Anchor the finding to a line changed since then, or drop it if the issue is only in previously reviewed code.`,
+        );
+      }
       output.findings.push(params as NewFinding);
       return toolSuccess("Finding recorded for validation after the review.");
     },
