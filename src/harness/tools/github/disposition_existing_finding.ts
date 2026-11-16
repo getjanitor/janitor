@@ -2,9 +2,21 @@ import { defineTool } from "@earendil-works/pi-coding-agent";
 import { Type } from "typebox";
 import { toolSuccess } from "#/harness/tools/github/result";
 import { requireValidModelText } from "#/review/model_result";
-import type { ExistingFindingDisposition, ModelReviewResult } from "#/review/types";
+import type {
+  ExistingFinding,
+  ExistingFindingDisposition,
+  ModelReviewResult,
+} from "#/review/types";
 
-export function createDispositionExistingFindingTool(output: ModelReviewResult) {
+/**
+ * Rejects thread IDs the prompt did not supply, and repeats, while the agent can still
+ * correct them; the same mistakes caught only after the session would fail the review.
+ */
+export function createDispositionExistingFindingTool(
+  output: ModelReviewResult,
+  previousFindings: readonly ExistingFinding[],
+) {
+  const threadIds = new Set(previousFindings.map((finding) => finding.threadId));
   return defineTool({
     name: "disposition_existing_finding",
     label: "Disposition existing finding",
@@ -25,6 +37,16 @@ export function createDispositionExistingFindingTool(output: ModelReviewResult) 
       ),
     }),
     execute: async (_toolCallId, params) => {
+      if (!threadIds.has(params.threadId)) {
+        throw new Error(
+          threadIds.size === 0
+            ? `Unknown threadId ${params.threadId}: there are no previous unresolved findings, so no disposition is needed. Resolved findings never take a disposition.`
+            : `Unknown threadId ${params.threadId}: use one of ${[...threadIds].join(", ")}. Resolved findings never take a disposition.`,
+        );
+      }
+      if (output.dispositions.some((disposition) => disposition.threadId === params.threadId)) {
+        throw new Error(`Thread ${params.threadId} already has a disposition`);
+      }
       if (params.status !== "still_present") {
         if (params.reason === undefined) {
           throw new Error(`A ${params.status} disposition requires a reason`);

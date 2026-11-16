@@ -21,6 +21,13 @@ export interface ReviewConfig {
   excludedBranches?: string[];
   /** Model reasoning effort; omitted means the agent library's default. */
   thinkingLevel?: ThinkingLevel;
+  /** When set, a check run on the head commit passes only at or above this confidence. */
+  mergeCheck?: MergeCheckConfig;
+}
+
+export interface MergeCheckConfig {
+  /** Lowest review confidence, from 1 to 5, that lets the check pass. */
+  minConfidence: number;
 }
 
 const nonEmptyString = type("string > 0");
@@ -33,6 +40,9 @@ const janitorConfigSchema = type({
     "included_branches?": nonEmptyString.array().atLeastLength(1),
     "excluded_branches?": nonEmptyString.array(),
     "thinking_level?": type.enumerated(...THINKING_LEVELS),
+    "merge_check?": {
+      min_confidence: "1 <= number.integer <= 5",
+    },
   },
 });
 
@@ -53,6 +63,10 @@ export const loadReviewConfig = Effect.fn("janitor.config.load")(function* (cwd:
         includedBranches: config.review.included_branches,
         excludedBranches: config.review.excluded_branches,
         thinkingLevel: config.review.thinking_level,
+        mergeCheck:
+          config.review.merge_check === undefined
+            ? undefined
+            : { minConfidence: config.review.merge_check.min_confidence },
       };
     },
     catch: (cause) => {

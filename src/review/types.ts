@@ -63,6 +63,11 @@ export interface ReviewedState {
   /** The general review published at `headSha`, so a re-review can revise it. */
   summary?: string;
   mermaid?: string;
+  /**
+   * The review confidence at `headSha`. A skipped re-review carries it to the merge
+   * check, so a push that changes no pull-request file keeps the previous verdict.
+   */
+  confidence?: number;
 }
 
 /** A pull-request file whose content changed between the last reviewed commit and head. */
@@ -199,6 +204,15 @@ export interface ReviewThreadRecord {
   comments: Array<{ databaseId: number | null; body: string; author: string | null }>;
 }
 
+export type CheckRunConclusion = "success" | "failure" | "skipped" | "cancelled";
+
+/** What a Janitor check run shows. `conclusion` is set exactly when the run is completed. */
+export interface CheckRunState {
+  conclusion?: CheckRunConclusion;
+  title: string;
+  summary: string;
+}
+
 /** The Promise-based GitHub operations Janitor performs, as `GitHubReviewClient` implements them. */
 export interface GitHubReviewClientShape {
   listGeneralComments(): Promise<GeneralCommentRecord[]>;
@@ -212,6 +226,9 @@ export interface GitHubReviewClientShape {
   resolveThread(threadId: string): Promise<void>;
   createGeneralComment(body: string): Promise<number>;
   updateGeneralComment(commentId: number, body: string): Promise<void>;
+  /** Creates a check run on `headSha` and returns its id. */
+  createCheckRun(name: string, headSha: string, state: CheckRunState): Promise<number>;
+  updateCheckRun(checkRunId: number, state: CheckRunState): Promise<void>;
 }
 
 export interface GitHubReviewBoundary {
@@ -226,4 +243,10 @@ export interface GitHubReviewBoundary {
   resolveThread(threadId: string): Effect.Effect<void, GitHubError>;
   createGeneralComment(body: string): Effect.Effect<number, GitHubError>;
   updateGeneralComment(commentId: number, body: string): Effect.Effect<void, GitHubError>;
+  createCheckRun(
+    name: string,
+    headSha: string,
+    state: CheckRunState,
+  ): Effect.Effect<number, GitHubError>;
+  updateCheckRun(checkRunId: number, state: CheckRunState): Effect.Effect<void, GitHubError>;
 }

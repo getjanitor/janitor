@@ -23,3 +23,13 @@ tracked_paths = [
 # Model reasoning effort: off, minimal, low, medium, high, xhigh, or max. Omitted means
 # medium. Levels above what the configured model supports are lowered to its maximum.
 # thinking_level = "high"
+
+# Report a "Janitor" check run on the head commit that passes only when the review's
+# confidence (1 to 5) reaches min_confidence. Make it a required status check in branch
+# protection to block merges. Needs the workflow's checks: write permission
+# (`janitor init --merge-check`).
+{% if merge_check %}[review.merge_check]
+min_confidence = 4
+{% else %}# [review.merge_check]
+# min_confidence = 4
+{% endif %}

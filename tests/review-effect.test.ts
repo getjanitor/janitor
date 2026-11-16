@@ -93,6 +93,8 @@ function githubClient(): GitHubReviewClientShape {
     resolveThread: vi.fn(async () => undefined),
     createGeneralComment: vi.fn(async () => 10),
     updateGeneralComment: vi.fn(async () => undefined),
+    createCheckRun: vi.fn(async () => 30),
+    updateCheckRun: vi.fn(async () => undefined),
   };
 }
 

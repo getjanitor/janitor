@@ -21,12 +21,15 @@ export interface InitOptions {
   force: boolean;
   githubIdentity: GitHubIdentity | undefined;
   janitorVersion: string | undefined;
+  /** Enables `review.merge_check` and grants the workflow `checks: write`. */
+  mergeCheck?: boolean;
 }
 
 export interface InitTemplateContext {
   github_app: boolean;
   janitor_package: string;
   janitor_version: string;
+  merge_check: boolean;
   tracked_paths: string[];
 }
 
@@ -110,6 +113,10 @@ export const initCliOptions = {
       description:
         "GitHub identity that posts reviews: github-actions or github-app (default: github-actions)",
       placeholder: "<identity>",
+    },
+    mergeCheck: {
+      type: Boolean,
+      description: "Report a confidence-gated check run that branch protection can require",
     },
     force: {
       type: Boolean,
@@ -260,6 +267,7 @@ export async function init(
       github_app: githubIdentity === "github-app",
       janitor_package: `@matfire/janitor@${janitorVersion}`,
       janitor_version: janitorVersion,
+      merge_check: options.mergeCheck ?? false,
       tracked_paths: DEFAULT_TRACKED_PATHS,
     },
     dependencies.templateLoader,
@@ -325,6 +333,7 @@ export function runInitCommand(action: InitAction = init, argv?: string[]) {
         force: flags.force ?? false,
         githubIdentity: flags.identity,
         janitorVersion: flags.janitorVersion,
+        mergeCheck: flags.mergeCheck ?? false,
       }),
     argv,
   );

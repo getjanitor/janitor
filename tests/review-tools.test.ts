@@ -31,6 +31,22 @@ const input: ReviewAgentInput = {
   resolvedDiscussions: [],
 };
 
+const withThread: ReviewAgentInput = {
+  ...input,
+  previousFindings: [
+    {
+      threadId: "thread",
+      commentId: 1,
+      path: "src/a.ts",
+      line: 1,
+      originalLine: 1,
+      isOutdated: false,
+      body: "finding",
+      replies: [],
+    },
+  ],
+};
+
 async function execute(
   tools: ReturnType<typeof createReviewTools>["tools"],
   name: string,
@@ -88,7 +104,7 @@ describe("incremental review tools", () => {
 describe("review agent tools", () => {
   it("exposes the diff read-only and records structured model output", async () => {
     const output: ModelReviewResult = { findings: [], dispositions: [], general: undefined };
-    const { tools } = createReviewTools(input, output);
+    const { tools } = createReviewTools(withThread, output);
 
     const diffResult = await execute(tools, "get_review_diff", { path: "src/a.ts" });
     expect(diffResult.content).toEqual([{ type: "text", text: "@@ -1 +1 @@\n-old\n+new" }]);
@@ -122,7 +138,7 @@ describe("review agent tools", () => {
 
   it("records dismissed findings only with a reason", async () => {
     const output: ModelReviewResult = { findings: [], dispositions: [], general: undefined };
-    const { tools } = createReviewTools(input, output);
+    const { tools } = createReviewTools(withThread, output);
     await expect(
       execute(tools, "disposition_existing_finding", { threadId: "thread", status: "dismissed" }),
     ).rejects.toThrow(/dismissed disposition requires a reason/u);
@@ -138,6 +154,37 @@ describe("review agent tools", () => {
         reason: "The caller already validates the input.",
       },
     ]);
+  });
+
+  it("rejects dispositions for unsupplied or already dispositioned threads", async () => {
+    const output: ModelReviewResult = { findings: [], dispositions: [], general: undefined };
+    // A resolved finding has no threadId; the model has invented one from its location.
+    await expect(
+      execute(createReviewTools(input, output).tools, "disposition_existing_finding", {
+        threadId: "src/a.ts:1",
+        status: "fixed",
+        reason: "Gone",
+      }),
+    ).rejects.toThrow(/no previous unresolved findings/u);
+
+    const { tools } = createReviewTools(withThread, output);
+    await expect(
+      execute(tools, "disposition_existing_finding", {
+        threadId: "other",
+        status: "still_present",
+      }),
+    ).rejects.toThrow(/use one of thread/u);
+    await execute(tools, "disposition_existing_finding", {
+      threadId: "thread",
+      status: "still_present",
+    });
+    await expect(
+      execute(tools, "disposition_existing_finding", {
+        threadId: "thread",
+        status: "still_present",
+      }),
+    ).rejects.toThrow(/already has a disposition/u);
+    expect(output.dispositions).toEqual([{ threadId: "thread", status: "still_present" }]);
   });
 
   it("rejects unknown diff paths and duplicate final submissions", async () => {
@@ -158,7 +205,7 @@ describe("review agent tools", () => {
 
   it("rejects reserved markers without mutation and records corrected retries", async () => {
     const output: ModelReviewResult = { findings: [], dispositions: [], general: undefined };
-    const { tools } = createReviewTools(input, output);
+    const { tools } = createReviewTools(withThread, output);
     const marker = FINDING_MARKER;
 
     const unsafeFinding = {
@@ -263,7 +310,7 @@ describe("review agent tools", () => {
 
     for (const testCase of cases) {
       const output: ModelReviewResult = { findings: [], dispositions: [], general: undefined };
-      const { tools } = createReviewTools(input, output);
+      const { tools } = createReviewTools(withThread, output);
       await expect(execute(tools, testCase.name, testCase.params)).rejects.toThrow(testCase.error);
       expect(output).toEqual({ findings: [], dispositions: [], general: undefined });
     }

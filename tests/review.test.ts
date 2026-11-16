@@ -150,6 +150,8 @@ function githubBoundary(
     resolveThread: vi.fn(async () => undefined),
     createGeneralComment: vi.fn(async () => 10),
     updateGeneralComment: vi.fn(async () => undefined),
+    createCheckRun: vi.fn(async () => 30),
+    updateCheckRun: vi.fn(async () => undefined),
   } as never;
 }
 
@@ -513,6 +515,25 @@ describe("review runtime and configuration", () => {
     await expect(Effect.runPromise(loadReviewConfig(directory))).rejects.toThrow(
       /thinking_level must be/u,
     );
+  });
+
+  it("loads the merge check and rejects confidence outside 1 to 5", async () => {
+    const directory = await temporaryDirectory();
+    const configPath = join(directory, "janitor.toml");
+    const base = "version = 'latest'\n[review]\ntracked_paths = ['**']\n";
+    await writeFile(configPath, `${base}[review.merge_check]\nmin_confidence = 3\n`);
+    await expect(Effect.runPromise(loadReviewConfig(directory))).resolves.toMatchObject({
+      mergeCheck: { minConfidence: 3 },
+    });
+
+    for (const value of ["0", "6", "3.5", "'4'"]) {
+      await writeFile(configPath, `${base}[review.merge_check]\nmin_confidence = ${value}\n`);
+      await expect(Effect.runPromise(loadReviewConfig(directory))).rejects.toThrow(
+        /min_confidence/u,
+      );
+    }
+    await writeFile(configPath, `${base}[review.merge_check]\n`);
+    await expect(Effect.runPromise(loadReviewConfig(directory))).rejects.toThrow(/min_confidence/u);
   });
 
   it("loads an explicit thinking level and leaves it unset by default", async () => {
@@ -1677,6 +1698,179 @@ describe("review reconciliation", () => {
       }),
     ).rejects.toThrow("model down");
     expect(steps.at(-1)).toBe("Janitor review failed during reviewing: model down");
+  });
+});
+
+describe("confidence merge check", () => {
+  const cleanResult: ModelReviewResult = { findings: [], dispositions: [], general: cleanGeneral };
+
+  function runWithMergeCheck(
+    minConfidence: number,
+    options: {
+      github?: ReturnType<typeof githubBoundary>;
+      agent?: ReviewAgentBoundary;
+      path?: string;
+    } = {},
+  ) {
+    const github = options.github ?? githubBoundary();
+    const promise = runReview({
+      cwd: "/repo",
+      context,
+      git: reviewGit(options.path),
+      github,
+      agent: options.agent ?? agent(cleanResult),
+      configLoader: async () => ({
+        trackedPaths: ["src/**"],
+        trackSpend: false,
+        mergeCheck: { minConfidence },
+      }),
+    });
+    return { github, promise };
+  }
+
+  it("passes the check when confidence meets the minimum", async () => {
+    const { github, promise } = runWithMergeCheck(4);
+    await promise;
+
+    expect(github.createCheckRun).toHaveBeenCalledWith("Janitor", "head-sha", {
+      title: "Review in progress",
+      summary: "Janitor is reviewing this commit.",
+    });
+    expect(github.updateCheckRun).toHaveBeenCalledOnce();
+    expect(github.updateCheckRun).toHaveBeenCalledWith(30, {
+      conclusion: "success",
+      title: "Confidence 4/5 (minimum 4)",
+      summary: expect.stringContaining(cleanGeneral.confidenceReason),
+    });
+    // The check completes only after the general comment carries the review.
+    expect(github.updateCheckRun.mock.invocationCallOrder[0]).toBeGreaterThan(
+      github.updateGeneralComment.mock.invocationCallOrder.at(-1)!,
+    );
+  });
+
+  it("fails the check when confidence is below the minimum", async () => {
+    const { github, promise } = runWithMergeCheck(5);
+    await expect(promise).resolves.toMatchObject({ skipped: false });
+
+    expect(github.updateCheckRun).toHaveBeenCalledWith(
+      30,
+      expect.objectContaining({ conclusion: "failure", title: "Confidence 4/5 (minimum 5)" }),
+    );
+  });
+
+  it("reports a skipped check so a required check does not hang", async () => {
+    const { github, promise } = runWithMergeCheck(4, { path: "docs/readme.md" });
+    await expect(promise).resolves.toMatchObject({ skipped: true });
+
+    expect(github.createCheckRun).toHaveBeenCalledWith(
+      "Janitor",
+      "head-sha",
+      expect.not.objectContaining({ conclusion: expect.anything() }),
+    );
+    expect(github.updateCheckRun).toHaveBeenCalledWith(
+      30,
+      expect.objectContaining({ conclusion: "skipped" }),
+    );
+    expect(github.createGeneralComment).not.toHaveBeenCalled();
+  });
+
+  it("fails the check when the diff cannot be collected", async () => {
+    const github = githubBoundary();
+    await expect(
+      runReview({
+        cwd: "/repo",
+        context,
+        git: gitFrom(async () => {
+          throw new Error("fatal: bad object");
+        }),
+        github,
+        agent: agent(cleanResult),
+        configLoader: async () => ({
+          trackedPaths: ["src/**"],
+          trackSpend: false,
+          mergeCheck: { minConfidence: 4 },
+        }),
+      }),
+    ).rejects.toThrow("fatal: bad object");
+
+    expect(github.updateCheckRun).toHaveBeenCalledWith(
+      30,
+      expect.objectContaining({ conclusion: "failure", title: "Review failed" }),
+    );
+  });
+
+  it("cancels the check when the review is interrupted", async () => {
+    const github = githubBoundary();
+    const controller = new AbortController();
+    const started = Promise.withResolvers<void>();
+    const hangingAgent: ReviewAgentBoundary = {
+      run: () => Effect.sync(() => started.resolve()).pipe(Effect.andThen(Effect.never)),
+    };
+    const exit = Effect.runPromiseExit(
+      executeReview({ cwd: "/repo" }).pipe(
+        Effect.provide(
+          reviewLayers({
+            context,
+            git: reviewGit(),
+            github,
+            agent: hangingAgent,
+            configLoader: async () => ({
+              trackedPaths: ["src/**"],
+              trackSpend: false,
+              mergeCheck: { minConfidence: 4 },
+            }),
+          }),
+        ),
+      ),
+      { signal: controller.signal },
+    );
+    await started.promise;
+    controller.abort();
+    await exit;
+
+    expect(github.updateCheckRun).toHaveBeenCalledWith(
+      30,
+      expect.objectContaining({ conclusion: "cancelled" }),
+    );
+    expect(github.updateGeneralComment).toHaveBeenLastCalledWith(
+      10,
+      expect.stringContaining("failed"),
+    );
+  });
+
+  it("fails the check when the review fails", async () => {
+    const { github, promise } = runWithMergeCheck(1, {
+      agent: promiseAgent(async () => {
+        throw new Error("model down");
+      }),
+    });
+    await expect(promise).rejects.toThrow("model down");
+
+    expect(github.updateCheckRun).toHaveBeenCalledWith(
+      30,
+      expect.objectContaining({ conclusion: "failure", title: "Review failed" }),
+    );
+  });
+
+  it("fails before commenting when the token cannot create checks", async () => {
+    const github = githubBoundary();
+    github.createCheckRun.mockRejectedValue(
+      Object.assign(new Error("Resource not accessible by integration"), { status: 403 }),
+    );
+    const reviewAgent = agent(cleanResult);
+    const { promise } = runWithMergeCheck(4, { github, agent: reviewAgent });
+
+    await expect(promise).rejects.toThrow(/checks: write/u);
+    expect(github.createGeneralComment).not.toHaveBeenCalled();
+    expect(reviewAgent.run).not.toHaveBeenCalled();
+  });
+
+  it("creates no check run unless the merge check is configured", async () => {
+    const github = githubBoundary();
+    await execute(cleanResult, github);
+
+    expect(github.createCheckRun).not.toHaveBeenCalled();
+    expect(github.updateCheckRun).not.toHaveBeenCalled();
   });
 });
 

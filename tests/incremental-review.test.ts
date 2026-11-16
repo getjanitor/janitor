@@ -117,6 +117,8 @@ function github(options: { reviewed?: ReviewedState; threads?: ReviewThreadRecor
     resolveThread: vi.fn(async () => undefined),
     createGeneralComment: vi.fn(async () => 10),
     updateGeneralComment: vi.fn(async (_id: number, _body: string) => undefined),
+    createCheckRun: vi.fn(async () => 30),
+    updateCheckRun: vi.fn(async () => undefined),
   };
 }
 
@@ -177,6 +179,9 @@ describe("reviewed state marker", () => {
     expect(parseReviewedState("no marker")).toBeUndefined();
     expect(parseReviewedState("<!-- janitor:reviewed:v1\n{nope\n-->")).toBeUndefined();
     expect(parseReviewedState(renderReviewedState({ headSha: "--output=x" }))).toBeUndefined();
+    expect(
+      parseReviewedState(renderReviewedState({ headSha: "abc", confidence: 9 }))?.confidence,
+    ).toBeUndefined();
   });
 });
 
@@ -214,6 +219,7 @@ describe("incremental re-reviews", () => {
       mergeBase: "merge-sha",
       summary: general.summary,
       mermaid: general.mermaid,
+      confidence: general.confidence,
     });
 
     const rerun = github({ reviewed: { headSha: "prev-sha", mergeBase: "merge-sha" } });
@@ -245,6 +251,40 @@ describe("incremental re-reviews", () => {
     });
     expect(inputs).toHaveLength(0);
     expect(client.updateGeneralComment).not.toHaveBeenCalled();
+  });
+
+  it("carries the last confidence to the merge check when a re-review skips", async () => {
+    // Same head as the last review: the run skips, but the check must not pass.
+    const client = github({
+      reviewed: { headSha: "head-sha", mergeBase: "merge-sha", confidence: 2 },
+    });
+    const { result, inputs } = await run({
+      git: twoFileGit().git,
+      github: client,
+      config: { mergeCheck: { minConfidence: 4 } },
+    });
+    expect(result.skipped).toBe(true);
+    expect(inputs).toHaveLength(0);
+    expect(client.updateCheckRun).toHaveBeenCalledWith(30, {
+      conclusion: "failure",
+      title: "Confidence 2/5 (minimum 4)",
+      summary: expect.stringContaining("head-sha"),
+    });
+  });
+
+  it("reviews again for the merge check when the last review recorded no confidence", async () => {
+    const client = github({ reviewed: { headSha: "head-sha", mergeBase: "merge-sha" } });
+    const { result, inputs } = await run({
+      git: twoFileGit().git,
+      github: client,
+      config: { mergeCheck: { minConfidence: 4 } },
+    });
+    expect(result.skipped).toBe(false);
+    expect(inputs[0]?.incremental).toBeUndefined();
+    expect(client.updateCheckRun).toHaveBeenCalledWith(
+      30,
+      expect.objectContaining({ conclusion: "success" }),
+    );
   });
 
   it("reviews an already reviewed head again when incremental reviews are disabled", async () => {

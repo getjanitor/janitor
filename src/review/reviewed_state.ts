@@ -33,6 +33,14 @@ export function parseReviewedState(body: string): ReviewedState | undefined {
     const summary = carriedText(record.summary);
     const mermaid = carriedText(record.mermaid);
     if (summary !== undefined) state.summary = summary;
+    if (
+      typeof record.confidence === "number" &&
+      Number.isInteger(record.confidence) &&
+      record.confidence >= 1 &&
+      record.confidence <= 5
+    ) {
+      state.confidence = record.confidence;
+    }
     if (mermaid !== undefined) state.mermaid = mermaid;
     return state;
   } catch {

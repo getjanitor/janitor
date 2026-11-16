@@ -33,6 +33,10 @@ function createFakeOctokit() {
         pulls: {
           createReviewComment: vi.fn(),
         },
+        checks: {
+          create: vi.fn(),
+          update: vi.fn(),
+        },
       },
     },
   };
@@ -174,6 +178,36 @@ describe("GitHub review client", () => {
     expect(fake.octokit.rest.issues.updateComment).toHaveBeenCalledWith(
       expect.objectContaining({ comment_id: 8, body: "updated" }),
     );
+  });
+
+  it("creates in-progress check runs and completes them with a conclusion", async () => {
+    const fake = createFakeOctokit();
+    fake.octokit.rest.checks.create.mockResolvedValue({ data: { id: 31 } });
+    fake.octokit.rest.checks.update.mockResolvedValue({});
+    const github = client(fake);
+
+    await expect(
+      github.createCheckRun("Janitor", "head", { title: "Running", summary: "Reviewing." }),
+    ).resolves.toBe(31);
+    await github.updateCheckRun(31, { conclusion: "failure", title: "Low", summary: "Why." });
+
+    expect(fake.octokit.rest.checks.create).toHaveBeenCalledWith({
+      owner: "owner",
+      repo: "repo",
+      name: "Janitor",
+      head_sha: "head",
+      status: "in_progress",
+      output: { title: "Running", summary: "Reviewing." },
+    });
+    expect(fake.octokit.rest.checks.update).toHaveBeenCalledWith({
+      owner: "owner",
+      repo: "repo",
+      check_run_id: 31,
+      status: "completed",
+      conclusion: "failure",
+      completed_at: expect.any(String),
+      output: { title: "Low", summary: "Why." },
+    });
   });
 
   it("propagates Octokit API errors", async () => {

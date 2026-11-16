@@ -2,6 +2,7 @@ import { Effect } from "effect";
 import { Octokit } from "octokit";
 import { errorMessage, GitHubError, httpStatus } from "#/review/errors";
 import type {
+  CheckRunState,
   GitHubReviewBoundary,
   GitHubReviewClientShape,
   NewFinding,
@@ -207,6 +208,38 @@ export class GitHubReviewClient implements GitHubReviewClientShape {
       body,
     });
   }
+
+  async createCheckRun(name: string, headSha: string, state: CheckRunState): Promise<number> {
+    const response = await this.#octokit.rest.checks.create({
+      owner: this.#context.owner,
+      repo: this.#context.repo,
+      name,
+      head_sha: headSha,
+      ...checkRunFields(state),
+    });
+    return response.data.id;
+  }
+
+  async updateCheckRun(checkRunId: number, state: CheckRunState): Promise<void> {
+    await this.#octokit.rest.checks.update({
+      owner: this.#context.owner,
+      repo: this.#context.repo,
+      check_run_id: checkRunId,
+      ...checkRunFields(state),
+    });
+  }
+}
+
+function checkRunFields(state: CheckRunState) {
+  const output = { title: state.title, summary: state.summary };
+  return state.conclusion === undefined
+    ? { status: "in_progress" as const, output }
+    : {
+        status: "completed" as const,
+        conclusion: state.conclusion,
+        completed_at: new Date().toISOString(),
+        output,
+      };
 }
 
 function gitHubCall<A>(
@@ -250,6 +283,19 @@ export function gitHubReviewFromClient(client: GitHubReviewClientShape): GitHubR
     updateGeneralComment: (commentId, body) =>
       gitHubCall("updateGeneralComment", { "janitor.comment.id": commentId }, () =>
         client.updateGeneralComment(commentId, body),
+      ),
+    createCheckRun: (name, headSha, state) =>
+      gitHubCall("createCheckRun", { "janitor.check.name": name }, () =>
+        client.createCheckRun(name, headSha, state),
+      ),
+    updateCheckRun: (checkRunId, state) =>
+      gitHubCall(
+        "updateCheckRun",
+        {
+          "janitor.check.id": checkRunId,
+          "janitor.check.conclusion": state.conclusion ?? "in_progress",
+        },
+        () => client.updateCheckRun(checkRunId, state),
       ),
   };
 }

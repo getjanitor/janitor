@@ -3,6 +3,7 @@ import { shouldReviewBranch, shouldRunReview, type ReviewConfig } from "#/review
 import {
   CommentTooLarge,
   errorMessage,
+  GitHubError,
   ModelOutputInvalid,
   type ReviewError,
 } from "#/review/errors";
@@ -23,6 +24,14 @@ import {
   renderOutsideDiffFindings,
   type GeneralCommentFinding,
 } from "#/review/markers";
+import {
+  carriedCheck,
+  failedCheck,
+  MERGE_CHECK_NAME,
+  reviewedCheck,
+  runningCheck,
+  skippedCheck,
+} from "#/review/merge_check";
 import { modelTextProblem } from "#/review/model_result";
 import { parseReviewedState } from "#/review/reviewed_state";
 import {
@@ -42,6 +51,7 @@ import {
   type ReviewUsageAccumulator,
 } from "#/review/spend";
 import type {
+  CheckRunState,
   ExistingFinding,
   ExistingGeneralComment,
   ExistingFindingDisposition,
@@ -238,6 +248,61 @@ const initialize = Effect.fn("janitor.review.initialize")(function* (
   return config;
 });
 
+/** GitHub answers 403 when the token lacks the Checks permission. */
+function explainCheckPermission(error: GitHubError): GitHubError {
+  return error.status === 403
+    ? new GitHubError({
+        message: `${error.message}. review.merge_check needs a token with checks: write; regenerate the workflow with \`janitor init --merge-check\`.`,
+        operation: error.operation,
+        status: error.status,
+        cause: error.cause,
+      })
+    : error;
+}
+
+const createCheck = Effect.fn("janitor.review.create_check")(function* (
+  headSha: string,
+  state: CheckRunState,
+) {
+  const reporter = yield* ReviewReporter;
+  const github = yield* GitHubReview;
+  const checkRunId = yield* github
+    .createCheckRun(MERGE_CHECK_NAME, headSha, state)
+    .pipe(Effect.mapError(explainCheckPermission));
+  yield* Effect.annotateCurrentSpan({
+    "janitor.check.id": checkRunId,
+    "janitor.check.conclusion": state.conclusion ?? "in_progress",
+  });
+  yield* reporter.detail(`${MERGE_CHECK_NAME} check created: ${state.title}.`);
+  return checkRunId;
+});
+
+const completeCheck = Effect.fn("janitor.review.complete_check")(function* (
+  checkRunId: number,
+  state: CheckRunState,
+) {
+  const reporter = yield* ReviewReporter;
+  const github = yield* GitHubReview;
+  yield* github.updateCheckRun(checkRunId, state);
+  yield* reporter.detail(`${MERGE_CHECK_NAME} check completed: ${state.title}.`);
+});
+
+/** Best effort, like `markCommentFailed`: the review's own failure is what gets reported. */
+function markCheckFailed(
+  checkRunId: number,
+  cause: Cause.Cause<unknown>,
+): Effect.Effect<void, never, GitHubReview | ReviewReporter> {
+  return completeCheck(checkRunId, failedCheck(Cause.hasInterruptsOnly(cause))).pipe(
+    Effect.catchCause((failure) =>
+      ReviewReporter.use((reporter) =>
+        reporter.detail(
+          `Unable to mark the ${MERGE_CHECK_NAME} check failed: ${causeMessage(failure)}`,
+        ),
+      ),
+    ),
+  );
+}
+
 const collectDiff = Effect.fn("janitor.review.collect_diff")(function* (
   cwd: string,
   context: PullRequestContext,
@@ -375,7 +440,9 @@ interface ReviewScope {
   carriedFindings: ExistingFinding[];
 }
 
-type ReviewPlan = { kind: "skip"; reason: string } | { kind: "review"; scope: ReviewScope };
+type ReviewPlan =
+  | { kind: "skip"; reason: string; previous: ReviewedState }
+  | { kind: "review"; scope: ReviewScope };
 
 function fullScope(feedback: PreviousFeedback): ReviewScope {
   return { incremental: undefined, agentFindings: feedback.previousFindings, carriedFindings: [] };
@@ -443,7 +510,7 @@ const planReview = Effect.fn("janitor.review.plan")(function* (
     const reason = sameHead
       ? `head ${diff.headSha} was already reviewed.`
       : `no pull-request file changed since the last review at ${previous.headSha}.`;
-    return { kind: "skip", reason } as ReviewPlan;
+    return { kind: "skip", reason, previous } as ReviewPlan;
   }
 
   const agentFindings = feedback.previousFindings.filter((finding) =>
@@ -776,6 +843,7 @@ const reviewAndPublish = Effect.fnUntraced(function* (
       mergeBase: diff.mergeBase,
       summary: validated.general.summary,
       mermaid: validated.general.mermaid,
+      confidence: validated.general.confidence,
     },
   );
   // Fail before any GitHub mutation unless the worst case fits: every finding
@@ -814,7 +882,68 @@ const reviewAndPublish = Effect.fnUntraced(function* (
     dismissed: groups.dismissed.length,
     ...(incremental === undefined ? {} : { incrementalFrom: incremental.previous.headSha }),
   };
-  return result;
+  return { result, general: validated.general };
+});
+
+/**
+ * Plans the review from previous feedback, then owns the general comment's lifecycle:
+ * running, then published or failed. An incremental plan may skip the review.
+ */
+const reviewWithComment = Effect.fnUntraced(function* (
+  cwd: string,
+  context: PullRequestContext,
+  config: ReviewConfig,
+  diff: ReviewDiff,
+) {
+  const reporter = yield* ReviewReporter;
+  const feedback = yield* loadPreviousFeedback(config.trackSpend).pipe(withinStep("context"));
+  let plan = yield* planReview(cwd, config, diff, feedback).pipe(withinStep("context"));
+  if (plan.kind === "skip") {
+    const confidence = plan.previous.confidence;
+    if (config.mergeCheck === undefined || confidence !== undefined) {
+      return { kind: "skipped" as const, reason: plan.reason, previous: plan.previous };
+    }
+    // The merge check needs a confidence to report, and older comments do not record one.
+    yield* reporter.detail(
+      "Reviewing the whole pull request: review.merge_check needs a confidence the last review did not record.",
+    );
+    plan = { kind: "review", scope: fullScope(feedback) };
+  }
+
+  const markFailed = (commentId: number, usage: ReviewUsageAccumulator | undefined) => () =>
+    markCommentFailed(
+      commentId,
+      context,
+      config.trackSpend,
+      feedback.spendHistory,
+      usage,
+      feedback.reviewed,
+    );
+
+  const existing = feedback.generalComment;
+  const running = setCommentRunning(
+    existing,
+    config.trackSpend ? feedback.spendHistory : undefined,
+    feedback.reviewed,
+  ).pipe(withinStep("context"));
+  // An existing comment may already show "running" when that update fails, so it is
+  // marked failed too. A comment that could not be created has nothing to update.
+  const commentId = yield* existing === undefined
+    ? running
+    : running.pipe(Effect.onError(markFailed(existing.id, undefined)));
+
+  const usage = createReviewUsageAccumulator();
+  const reviewed = yield* reviewAndPublish(
+    cwd,
+    context,
+    config,
+    diff,
+    feedback,
+    plan.scope,
+    commentId,
+    usage,
+  ).pipe(Effect.onError(markFailed(commentId, usage)));
+  return { kind: "reviewed" as const, ...reviewed };
 });
 
 export const executeReview: (
@@ -831,58 +960,54 @@ export const executeReview: (
     });
 
     const config = yield* initialize(options.cwd, context).pipe(withinStep("initialization"));
-    if (!shouldReviewBranch(context.headRef, config)) {
-      const skipReason = `branch ${context.headRef} is not selected by review.included_branches/excluded_branches.`;
-      yield* reporter.detail(`Skipping agent review: ${skipReason}`);
-      return skippedResult(skipReason);
-    }
+    const mergeCheck = config.mergeCheck;
+    // Created right after the config loads, before any comment change or model usage,
+    // so a missing Checks permission fails fast and every later outcome completes it.
+    const checkRunId =
+      mergeCheck === undefined
+        ? undefined
+        : yield* createCheck(context.headSha, runningCheck).pipe(withinStep("initialization"));
+    const complete = (state: CheckRunState) =>
+      checkRunId === undefined ? Effect.void : completeCheck(checkRunId, state);
 
-    const diff = yield* collectDiff(options.cwd, context).pipe(withinStep("context"));
-    if (diff.files.length === 0 || !shouldRunReview(diff.files, config.trackedPaths)) {
-      const skipReason = "no changed path matched review.tracked_paths.";
-      yield* reporter.detail(`Skipping agent review: ${skipReason}`);
-      return skippedResult(skipReason);
-    }
+    return yield* Effect.gen(function* () {
+      // A required check that never reports would block the merge, so skips report too.
+      const skip = Effect.fnUntraced(function* (skipReason: string) {
+        yield* reporter.detail(`Skipping agent review: ${skipReason}`);
+        yield* complete(skippedCheck(skipReason));
+        return skippedResult(skipReason);
+      });
+      if (!shouldReviewBranch(context.headRef, config)) {
+        return yield* skip(
+          `branch ${context.headRef} is not selected by review.included_branches/excluded_branches.`,
+        ).pipe(withinStep("initialization"));
+      }
 
-    const feedback = yield* loadPreviousFeedback(config.trackSpend).pipe(withinStep("context"));
-    const plan = yield* planReview(options.cwd, config, diff, feedback).pipe(withinStep("context"));
-    if (plan.kind === "skip") {
-      yield* reporter.detail(`Skipping agent review: ${plan.reason}`);
-      return skippedResult(plan.reason);
-    }
+      const diff = yield* collectDiff(options.cwd, context).pipe(withinStep("context"));
+      if (diff.files.length === 0 || !shouldRunReview(diff.files, config.trackedPaths)) {
+        return yield* skip("no changed path matched review.tracked_paths.").pipe(
+          withinStep("context"),
+        );
+      }
 
-    const markFailed = (commentId: number, usage: ReviewUsageAccumulator | undefined) => () =>
-      markCommentFailed(
-        commentId,
-        context,
-        config.trackSpend,
-        feedback.spendHistory,
-        usage,
-        feedback.reviewed,
-      );
-
-    const existing = feedback.generalComment;
-    const running = setCommentRunning(
-      existing,
-      config.trackSpend ? feedback.spendHistory : undefined,
-      feedback.reviewed,
-    ).pipe(withinStep("context"));
-    // An existing comment may already show "running" when that update fails, so it is
-    // marked failed too. A comment that could not be created has nothing to update.
-    const commentId = yield* existing === undefined
-      ? running
-      : running.pipe(Effect.onError(markFailed(existing.id, undefined)));
-
-    const usage = createReviewUsageAccumulator();
-    return yield* reviewAndPublish(
-      options.cwd,
-      context,
-      config,
-      diff,
-      feedback,
-      plan.scope,
-      commentId,
-      usage,
-    ).pipe(Effect.onError(markFailed(commentId, usage)));
+      const outcome = yield* reviewWithComment(options.cwd, context, config, diff);
+      if (outcome.kind === "skipped") {
+        const { confidence, headSha } = outcome.previous;
+        if (mergeCheck === undefined || confidence === undefined) {
+          return yield* skip(outcome.reason).pipe(withinStep("context"));
+        }
+        yield* reporter.detail(`Skipping agent review: ${outcome.reason}`);
+        yield* complete(carriedCheck(confidence, headSha, mergeCheck)).pipe(withinStep("context"));
+        return skippedResult(outcome.reason);
+      }
+      if (mergeCheck !== undefined) {
+        yield* complete(reviewedCheck(outcome.general, mergeCheck)).pipe(withinStep("publish"));
+      }
+      return outcome.result;
+    }).pipe(
+      Effect.onError((cause) =>
+        checkRunId === undefined ? Effect.void : markCheckFailed(checkRunId, cause),
+      ),
+    );
   },
 );
